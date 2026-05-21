@@ -35,19 +35,6 @@
     </script>
     <script src="/static/keys.js"></script>
 
-    {# First-load progress overlay. Hidden when the cache paint succeeds
-       (handled in keys.js: cache paint inserts cards immediately, so the
-       MutationObserver fires before this is shown). If no cache, this
-       sits above an empty #groups until the streamed render delivers the
-       first .group-card. #}
-    <div id="first-load" class="first-load" hidden>
-      <div class="fl-card">
-        <div class="fl-title">Loading torrent list</div>
-        <div class="fl-bar"><div class="fl-bar-fill" id="fl-bar-fill"></div></div>
-        <ol class="fl-log" id="fl-log" aria-live="polite"></ol>
-      </div>
-    </div>
-
     <div id="groups-container"
          hx-ext="sse"
          sse-connect="/sse"
@@ -71,6 +58,19 @@
           {% include "_empty.html" %}
         {% endif %}
       </div>
+
+      {# Permanent staging slot for batched RESYNC payloads. Each SSE
+         batch hx-swap-oob="outerHTML" replaces this element with one
+         carrying its rendered cards; keys.js then moves the children
+         into #groups (replace if id exists, append otherwise). Always
+         hidden -- it's a holding pen, never user-visible. #}
+      <div id="qf-batch-staging" hidden></div>
+
+      {# Progress block. Sibling-after-#groups so CSS naturally places
+         it below the last card. Server populates inner HTML each batch
+         with the bar + label; the final batch sends an empty payload
+         so :empty hides it. #}
+      <div id="qf-load-progress" class="qf-load-progress" aria-live="polite"></div>
     </div>
 
     {% include "_selection_bar.html" %}

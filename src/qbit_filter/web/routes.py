@@ -7,7 +7,7 @@ import json
 import logging
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -64,6 +64,12 @@ _RENDER_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="qf-render")
 # TCP/HTTP framing cost per group while still flushing fast enough to start
 # painting within tens of milliseconds.
 _STREAM_FLUSH_BYTES = 16 * 1024
+
+# Adaptive batch sizes for a RESYNC delivered over SSE. The first batch is
+# intentionally tiny so the user sees content within ~1 frame; later batches
+# expand so total wall-clock isn't dominated by per-batch framing overhead.
+# After the last entry, the final size is reused for any remaining groups.
+_RESYNC_BATCH_SIZES = (10, 25, 50, 100, 100, 100)
 
 
 def _get_or_create_subscription(
@@ -222,8 +228,9 @@ def register_routes(app: FastAPI) -> None:
             elif not visible:
                 # Distinguish "store still warming up (no torrents yet)" from
                 # "filter excludes everything". The former hands the screen to
-                # the first-load progress overlay (see static/keys.js); the
-                # latter shows a guidance message with a Clear-all button.
+                # the batched-RESYNC progress block (see static/keys.js
+                # setupLoadProgress + applyBatchStaging); the latter shows a
+                # guidance message with a Clear-all button.
                 if (
                     not store.torrents
                     and filter_parse.active_count(sub.filter_state) == 0
@@ -333,9 +340,16 @@ def register_routes(app: FastAPI) -> None:
                             batch.append(sub.queue.get_nowait())
                         except asyncio.QueueEmpty:
                             break
-                    payload = _render_event_batch(request, store, sub, batch)
-                    if payload:
-                        yield f"event: message\ndata: {payload}\n\n"
+                    for payload in _render_event_batch_iter(
+                        request, store, sub, batch
+                    ):
+                        if payload:
+                            yield f"event: message\ndata: {payload}\n\n"
+                            # Cooperative yield so each batch reaches the wire
+                            # before we render the next one; otherwise large
+                            # RESYNCs render N batches synchronously and only
+                            # flush at the end, defeating the purpose.
+                            await asyncio.sleep(0)
             finally:
                 sub.sse_refs -= 1
                 if sub.sse_refs <= 0:
@@ -618,54 +632,177 @@ def _esc_for_sse(html: str) -> str:
     return html.replace("\r", "").replace("\n", "")
 
 
-def _render_event_batch(
+def _render_event_batch_iter(
+    request: Request,
+    store: Store,
+    sub: Subscription,
+    events: list[DomainEvent],
+) -> Iterator[str]:
+    """Yield one or more SSE ``data:`` payloads for a tick's events.
+
+    A RESYNC in the batch fans out into multiple payloads via
+    :func:`_emit_resync_batches` so the browser paints the group list
+    incrementally (adaptive 10/25/50/100... cards per batch) instead of
+    blocking on one ~2.5 MB swap. Delta-only batches still yield a single
+    deduped payload.
+    """
+    has_resync = any(e.kind == EventKind.RESYNC for e in events)
+    if has_resync:
+        now = time.monotonic()
+        if now - sub.last_resync_at >= RESYNC_COALESCE_INTERVAL:
+            sub.last_resync_at = now
+            yield from _emit_resync_batches(request, store, sub)
+            # The batched snapshot is authoritative; drop any delta events
+            # in the same tick. Their state is already reflected.
+            return
+        # Coalesce window hit -- drop the RESYNC, let deltas through.
+        events = [e for e in events if e.kind != EventKind.RESYNC]
+        if not events:
+            return
+
+    payload = _render_delta_events(request, store, sub, events)
+    if payload:
+        yield payload
+
+
+def _emit_resync_batches(
+    request: Request,
+    store: Store,
+    sub: Subscription,
+) -> Iterator[str]:
+    """Yield batched SSE payloads that incrementally rebuild ``#groups``.
+
+    Each payload contains:
+    - ``#qf-batch-staging`` (OOB outerHTML) carrying the rendered group cards
+      for this batch. The client moves children into ``#groups`` with a
+      replace-or-append heuristic so warm RESYNCs swap in-place and cold
+      RESYNCs append in sorted order.
+    - ``#qf-load-progress`` (OOB innerHTML) carrying the visible progress
+      block. Empty on the final batch so CSS hides it.
+    - Chrome OOBs (``#active-filters``, ``#filter-facets``) on the first
+      batch so headline counts update with the snapshot.
+
+    The final batch carries the canonical ordered group-slug list on
+    ``data-canonical`` so the client can prune any DOM cards no longer
+    in the snapshot.
+    """
+    fs = sub.filter_state
+    visible = apply_filters(store, fs)
+    total = len(visible)
+
+    active_html = render.render_active_filters(request, store, fs, visible=visible)
+    facets_html = render.render_filter_facets(request, store, fs)
+    chrome_oobs = (
+        f'<div id="active-filters" hx-swap-oob="outerHTML" '
+        f'aria-live="polite">{active_html}</div>'
+        f'<div id="filter-facets" hx-swap-oob="outerHTML">{facets_html}</div>'
+    )
+
+    if total == 0:
+        # Filter excludes everything (or store empty). Wipe #groups, remove
+        # any in-flight progress UI, and let the empty-state template render
+        # if the store has any torrents at all.
+        empty_html = ""
+        if store.torrents:
+            empty_html = render.render_groups_payload(
+                request, store, fs, visible=[]
+            )
+        payload = (
+            f'<div id="groups" hx-swap-oob="innerHTML">{empty_html}</div>'
+            f'<div id="qf-batch-staging" hx-swap-oob="outerHTML" '
+            f'data-final="1" data-canonical="" data-loaded="0" '
+            f'data-total="0" hidden></div>'
+            f'<div id="qf-load-progress" hx-swap-oob="innerHTML"></div>'
+            + chrome_oobs
+        )
+        yield _esc_for_sse(payload)
+        return
+
+    canonical_slugs = "|".join(g.key.slug() for g in visible)
+    log_lines: list[str] = [f"Connected -- {total} groups incoming"]
+
+    idx = 0
+    batch_n = 0
+    while idx < total:
+        size = (
+            _RESYNC_BATCH_SIZES[batch_n]
+            if batch_n < len(_RESYNC_BATCH_SIZES)
+            else _RESYNC_BATCH_SIZES[-1]
+        )
+        end = min(idx + size, total)
+        is_first = idx == 0
+        is_final = end == total
+
+        cards = "".join(
+            render.render_group(
+                request,
+                g,
+                store.torrents_in(g.key),
+                store=store,
+            )
+            for g in visible[idx:end]
+        )
+
+        staging = (
+            f'<div id="qf-batch-staging" hx-swap-oob="outerHTML" hidden '
+            f'data-loaded="{end}" data-total="{total}" '
+            f'data-final="{"1" if is_final else "0"}" '
+            f'data-canonical="{canonical_slugs if is_final else ""}">'
+            f'{cards}'
+            f'</div>'
+        )
+
+        log_lines.append(f"Loaded {end} of {total} groups")
+
+        if is_final:
+            # Empty inner content -> CSS :empty hides the block.
+            progress = (
+                '<div id="qf-load-progress" hx-swap-oob="innerHTML"></div>'
+            )
+        else:
+            pct = int(100 * end / total) if total else 0
+            log_html = "".join(
+                f"<li>{line}</li>" for line in log_lines
+            )
+            progress = (
+                f'<div id="qf-load-progress" hx-swap-oob="innerHTML">'
+                f'<div class="fl-card" role="status" aria-live="polite">'
+                f'<div class="fl-title">'
+                f'Loading torrent list -- {end} of {total} groups'
+                f'</div>'
+                f'<div class="fl-bar">'
+                f'<div class="fl-bar-fill" style="width:{pct}%"></div>'
+                f'</div>'
+                f'<ol class="fl-log">{log_html}</ol>'
+                f'</div>'
+                f'</div>'
+            )
+
+        parts = [staging, progress]
+        if is_first:
+            parts.append(chrome_oobs)
+
+        yield _esc_for_sse("".join(parts))
+
+        idx = end
+        batch_n += 1
+
+
+def _render_delta_events(
     request: Request,
     store: Store,
     sub: Subscription,
     events: list[DomainEvent],
 ) -> str:
-    """Serialise one tick's worth of events into a single SSE ``data:`` line.
+    """Serialise one tick's worth of NON-RESYNC events into a single SSE
+    ``data:`` line.
 
-    Strategy:
-    - Any RESYNC in the batch -> one full re-render of #groups + facets, skip
-      the rest (they're already covered).
-    - Otherwise dedupe per target: each affected group/torrent renders at most
-      once. A group re-render shadows its torrent updates (whole-card swap
-      includes the rows), so those are dropped.
-
-    SSE event payload is a single line; newlines inside the HTML are stripped
-    so htmx-ext-sse parses it as one ``data:`` field. ``hx-swap-oob`` lets a
-    single ``message`` event update many DOM nodes.
+    Dedupes per target: each affected group/torrent renders at most once. A
+    group re-render shadows its torrent updates (whole-card swap includes the
+    rows), so those are dropped. ``hx-swap-oob`` lets a single ``message``
+    event update many DOM nodes.
     """
     fs = sub.filter_state
-
-    has_resync = any(e.kind == EventKind.RESYNC for e in events)
-    if has_resync:
-        now = time.monotonic()
-        if now - sub.last_resync_at < RESYNC_COALESCE_INTERVAL:
-            # Recently sent a full RESYNC; skip this one and let the renderer
-            # fall through to delta events for any non-RESYNC items in this
-            # batch. The next RESYNC outside the coalesce window will rebase
-            # state if anything was missed.
-            events = [e for e in events if e.kind != EventKind.RESYNC]
-            if not events:
-                return ""
-        else:
-            sub.last_resync_at = now
-            visible = apply_filters(store, fs)
-            groups_html = render.render_groups_payload(request, store, fs, visible=visible)
-            active_html = render.render_active_filters(request, store, fs, visible=visible)
-            facets_html = render.render_filter_facets(request, store, fs)
-            active_oob = (
-                f'<div id="active-filters" hx-swap-oob="outerHTML" '
-                f'aria-live="polite">{active_html}</div>'
-            )
-            payload = (
-                f'<div id="groups" hx-swap-oob="innerHTML">{groups_html}</div>'
-                + active_oob
-                + f'<div id="filter-facets" hx-swap-oob="outerHTML">{facets_html}</div>'
-            )
-            return _esc_for_sse(payload)
 
     # Dedupe by target. dicts keep insertion order, which we use as render order.
     added_groups: dict[GroupKey, None] = {}

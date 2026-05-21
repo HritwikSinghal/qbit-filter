@@ -207,15 +207,20 @@ button { font: inherit; cursor: pointer; }
   padding: 4px 0 8px;
 }
 
-/* First-load progress overlay */
-.first-load {
-  position: relative;
-  padding: 32px 0;
+/* Batched-RESYNC progress block. Sits as a sibling AFTER #groups so it
+   naturally rides below the last rendered card. Hidden when empty so the
+   final batch (which sends empty inner HTML) removes the block without
+   needing a separate "remove" message. */
+.qf-load-progress {
+  padding: 16px 0;
+  transition: opacity var(--motion-base) var(--ease-out);
 }
-.first-load.fl-done {
-  opacity: 0;
-  transition: opacity var(--motion-slow) var(--ease-out);
+.qf-load-progress:empty {
+  display: none;
 }
+/* .fl-* class names live inside .qf-load-progress. Server emits them in
+   _emit_resync_batches and the client placeholder uses the same markup
+   via buildFlCard() in keys.js. */
 .fl-card {
   max-width: 520px;
   margin: 0 auto;

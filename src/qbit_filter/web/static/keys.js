@@ -168,89 +168,145 @@
   }, { once: true });
 
   /* =========================================================================
-     First-load progress overlay.
+     Batched-RESYNC load progress.
 
-     Shown only when the cache paint did NOT run (cold visits / cleared cache),
-     so the user has feedback during the multi-second initial stream. We track
-     a few milestones (script init, SSE open, first card painted, RESYNC done)
-     and bump the progress bar accordingly. The overlay self-removes once a
-     ``.group-card`` is in the DOM -- whichever event delivers it.
+     Server emits the initial RESYNC as a sequence of SSE messages, each
+     replacing #qf-batch-staging via hx-swap-oob="outerHTML" with a chunk of
+     rendered group cards plus a refreshed #qf-load-progress block. Below we:
+
+     1. Set a "Connecting..." placeholder if there's no card yet, so the user
+        sees feedback while the first batch is in flight.
+     2. Watch #qf-batch-staging swaps and move its children into #groups
+        (replace if id exists, append otherwise). On the final batch, prune
+        any DOM cards no longer in the canonical slug list.
+     3. After each batch, re-fire htmx:afterSwap + htmx:oobAfterSwap with
+        target=#groups so existing listeners (selection re-apply, viewport
+        observer, marked-row scan, cache save) treat it like a real
+        #groups-targeted swap.
      ========================================================================= */
-  function firstLoadOverlay() {
+  function buildFlCard(titleText, fillPct) {
+    /* DOM construction (no innerHTML) for the "Connecting..." placeholder
+       so the static-analysis hook doesn't flag this site. The server-side
+       progress block uses identical class names and is rendered server-side
+       in Jinja; this matches that markup. */
+    const card = document.createElement('div');
+    card.className = 'fl-card';
+    card.setAttribute('role', 'status');
+    card.setAttribute('aria-live', 'polite');
+    const title = document.createElement('div');
+    title.className = 'fl-title';
+    title.textContent = titleText;
+    const bar = document.createElement('div');
+    bar.className = 'fl-bar';
+    const fill = document.createElement('div');
+    fill.className = 'fl-bar-fill';
+    fill.style.width = fillPct + '%';
+    bar.appendChild(fill);
+    card.append(title, bar);
+    return card;
+  }
+
+  function setupLoadProgress() {
     const groups = document.getElementById('groups');
-    /* The script tag is inlined ABOVE #groups and #first-load so handlers
-       attach early under StreamingResponse. That means on first call those
-       elements aren't yet parsed -- retry on the next frame until they
-       appear (chrome is flushed in one go before group bodies stream in,
-       so this only ever takes a frame or two), with a hard cap so we don't
-       spin if something goes wrong. */
-    if (!groups || !document.getElementById('first-load')) {
-      if (firstLoadOverlay._retries === undefined) firstLoadOverlay._retries = 0;
-      if (firstLoadOverlay._retries++ > 200) return;
-      requestAnimationFrame(firstLoadOverlay);
+    const progress = document.getElementById('qf-load-progress');
+    if (!groups || !progress) {
+      if (setupLoadProgress._r === undefined) setupLoadProgress._r = 0;
+      if (setupLoadProgress._r++ > 200) return;
+      requestAnimationFrame(setupLoadProgress);
       return;
     }
-    /* Cache paint already inserts cards synchronously before this script's
-       IIFE finishes (qfPaintCache appends children to #groups in-line with
-       parsing). If we already see a card, skip the overlay entirely. */
+    /* Cache paint already inserts cards synchronously before this IIFE
+       returns. If a card is present, the first batch will only swap in
+       updates -- skip the "Connecting" placeholder so the user isn't
+       shown a spinner over content they already have. */
     if (groups.querySelector('.group-card')) return;
-    const overlay = document.getElementById('first-load');
-    const bar = document.getElementById('fl-bar-fill');
-    const log = document.getElementById('fl-log');
-    if (!overlay || !bar || !log) return;
-    overlay.hidden = false;
+    progress.replaceChildren(buildFlCard('Loading torrent list...', 5));
 
-    const milestones = [
-      { pct: 10, msg: 'Page loaded' },
-      { pct: 30, msg: 'Connecting to live stream' },
-      { pct: 55, msg: 'Receiving torrent snapshot' },
-      { pct: 80, msg: 'Rendering group cards' },
-      { pct: 100, msg: 'Done' },
-    ];
-    let step = 0;
-    const advance = (msg, pct) => {
-      const li = document.createElement('li');
-      li.textContent = msg;
-      log.appendChild(li);
-      log.scrollTop = log.scrollHeight;
-      bar.style.width = pct + '%';
-    };
-    const tick = () => {
-      if (step >= milestones.length) return;
-      const m = milestones[step++];
-      advance(m.msg, m.pct);
-    };
-    tick();  // "Page loaded"
-
-    document.body.addEventListener('htmx:sseOpen',  () => { if (step === 1) tick(); }, { once: true });
-    document.body.addEventListener('htmx:sseError', () => {
-      const li = document.createElement('li');
-      li.textContent = 'Stream error -- retrying';
-      li.className = 'err';
-      log.appendChild(li);
-    });
-
-    const obs = new MutationObserver(() => {
-      if (!groups.querySelector('.group-card')) return;
-      /* Drain remaining milestones quickly so the bar ends at 100% before
-         we fade out. The overlay leaves no residual DOM after removal. */
-      while (step < milestones.length) tick();
-      obs.disconnect();
-      overlay.classList.add('fl-done');
-      setTimeout(() => { overlay.remove(); }, 350);
-    });
-    obs.observe(groups, { childList: true });
-
-    /* Safety: if nothing arrives in 30 s, fade away rather than nailing
-       the user under a non-progressing bar. The page still works -- the
-       overlay just stops being useful. */
+    /* Safety: if nothing arrives in 30 s, surface a hint instead of
+       leaving the bar pinned at 5%. The first server batch will overwrite
+       this. */
     setTimeout(() => {
-      if (!document.getElementById('first-load')) return;
-      overlay.classList.add('fl-done');
-      setTimeout(() => overlay.remove(), 350);
+      if (!groups || groups.querySelector('.group-card')) return;
+      const card = document.createElement('div');
+      card.className = 'fl-card';
+      const t = document.createElement('div');
+      t.className = 'fl-title';
+      t.textContent = 'Stream not responding -- check server';
+      card.appendChild(t);
+      progress.replaceChildren(card);
     }, 30000);
   }
-  firstLoadOverlay();
+  setupLoadProgress();
+
+  /* Move the latest batch's cards from #qf-batch-staging into #groups. */
+  function applyBatchStaging(staging) {
+    const groups = document.getElementById('groups');
+    if (!groups || !staging) return;
+    const isFinal = staging.getAttribute('data-final') === '1';
+    const canonical = staging.getAttribute('data-canonical') || '';
+
+    /* Children are already-rendered .group-card articles. We pick them off
+       one at a time so the swap order is preserved if the server happens
+       to send overlapping ids (it doesn't, but be defensive). */
+    let card = staging.firstElementChild;
+    while (card) {
+      const next = card.nextElementSibling;
+      const id = card.id;
+      if (id) {
+        const existing = document.getElementById(id);
+        if (existing && existing !== card) {
+          /* Same group as one we already have -- replace in place so the
+             card keeps its DOM position and the progress block below
+             doesn't jump. */
+          existing.replaceWith(card);
+        } else {
+          /* New group -- append at the end of #groups. Batches arrive in
+             canonical sort order so successive appends preserve order. */
+          groups.appendChild(card);
+        }
+      }
+      card = next;
+    }
+
+    if (isFinal && canonical) {
+      /* Final batch: remove any DOM cards whose slug isn't in the canonical
+         set. Covers groups that were deleted between RESYNCs. */
+      const keep = new Set();
+      for (const s of canonical.split('|')) {
+        if (s) keep.add('group-' + s);
+      }
+      const toRemove = [];
+      for (const child of groups.children) {
+        if (child.id && child.id.startsWith('group-') && !keep.has(child.id)) {
+          toRemove.push(child);
+        }
+      }
+      for (const c of toRemove) c.remove();
+    }
+
+    /* Fire synthetic events so the existing handlers (selection re-apply,
+       viewport observer, marked-row scan, focused-row restore, cache save)
+       behave as if #groups was the swap target. Dispatched ON #groups so
+       both e.target and e.detail.target resolve to it -- the existing
+       handlers split on both. Otherwise none of them would see the new
+       cards (htmx fired its event with the staging div as the target,
+       which they all filter out). */
+    const detail = { target: groups, elt: groups };
+    groups.dispatchEvent(
+      new CustomEvent('htmx:oobAfterSwap', { bubbles: true, detail }),
+    );
+    groups.dispatchEvent(
+      new CustomEvent('htmx:afterSwap', { bubbles: true, detail }),
+    );
+  }
+
+  document.body.addEventListener('htmx:oobAfterSwap', (e) => {
+    const t = e.detail && e.detail.target;
+    if (!t || t.id !== 'qf-batch-staging') return;
+    /* Defer to next frame so htmx's own bookkeeping for this swap finishes
+       before we mutate adjacent DOM. */
+    requestAnimationFrame(() => applyBatchStaging(t));
+  });
 
   /* =========================================================================
      Theme: simple dark (default) / light toggle. Dark is the token default;
