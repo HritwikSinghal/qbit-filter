@@ -139,6 +139,12 @@ class ArrMatch:
     indexer: str = ""
     arr_tags: frozenset[str] = frozenset()
     orphaned: bool = False
+    # True iff this hash is the most-recent ``downloadFolderImported`` source
+    # for at least one file arr currently has on disk. arr drops the old
+    # ``downloadId`` from the imported-history head the moment it imports an
+    # upgrade, so absence is a strong "leftover from a prior grab" signal --
+    # cleanup rules promote ``arr_current`` torrents to keeper.
+    arr_current: bool = False
 
 
 @dataclass(slots=True)
@@ -168,6 +174,15 @@ class ArrSnapshot:
     quality_profiles_sonarr: dict[int, QualityProfile] = field(default_factory=dict)
     radarr_tag_labels: dict[int, str] = field(default_factory=dict)
     sonarr_tag_labels: dict[int, str] = field(default_factory=dict)
+    # Infohashes (lowercased) currently producing at least one imported file
+    # on arr's side. Derived from the head of ``eventType=downloadFolderImported``
+    # history grouped by entity (``movieId`` for radarr, ``episodeId`` for
+    # sonarr -- per-episode because a series carries files from many torrents,
+    # one per season is typical). A hash NOT in the set is by definition a
+    # superseded grab -- arr has since re-imported the same entity from a
+    # different downloadId.
+    radarr_current_download_ids: frozenset[str] = frozenset()
+    sonarr_current_download_ids: frozenset[str] = frozenset()
     # Empty when both arr URLs are unset.
     ok: bool = False
     # Per-service fetch outcome -- distinct from ``ok`` (which is "any arr

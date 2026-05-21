@@ -1621,6 +1621,15 @@ kbd {
   background: rgba(240, 133, 126, 0.10);
   max-width: 24ch;
 }
+/* "arr live" pill -- row backs the current imported file in arr.
+   Greenish to read as a positive signal ("this is the canonical copy")
+   while staying inside the existing chip surface (same height/padding
+   as the release-group / indexer chips). */
+.meta .arr-current {
+  color: var(--success, #6ee7a8);
+  border-color: color-mix(in oklch, var(--success, #6ee7a8) 50%, transparent);
+  background: color-mix(in oklch, var(--success, #6ee7a8) 12%, transparent);
+}
 
 .arr-history-badge {
   display: inline-flex;

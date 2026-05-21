@@ -66,6 +66,9 @@
     {% if _arr_match and _arr_match.queue_status_messages %}
       <span class="arr-chip arr-error" title="{{ _arr_match.queue_status_messages | join(' | ') }}">arr: {{ _arr_match.queue_status_messages[0] }}</span>
     {% endif %}
+    {% if _arr_match and _arr_match.arr_current %}
+      <span class="arr-chip arr-current" title="Backs {{ _arr_match.source | capitalize }}'s most recent imported file -- the copy arr considers live on disk">arr live</span>
+    {% endif %}
   </span>
   {% if _factors %}
     <span class="reason-factors">

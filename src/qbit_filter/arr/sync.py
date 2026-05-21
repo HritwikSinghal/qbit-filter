@@ -39,6 +39,7 @@ _RadarrFetch = tuple[
     dict[str, HistoryMeta],
     dict[int, QualityProfile],
     dict[int, str],
+    frozenset[str],
 ]
 _SonarrFetch = tuple[
     list[ArrSeries],
@@ -46,38 +47,41 @@ _SonarrFetch = tuple[
     dict[str, HistoryMeta],
     dict[int, QualityProfile],
     dict[int, str],
+    frozenset[str],
 ]
 
 
 async def _fetch_radarr_all(
     client: httpx.AsyncClient, url: str, api_key: str
 ) -> _RadarrFetch:
-    # Fan out all five Radarr endpoints concurrently. Each call shares the
+    # Fan out all six Radarr endpoints concurrently. Each call shares the
     # same ``httpx.AsyncClient`` (and therefore its connection pool), so the
     # gather is effectively bounded by Radarr's slowest single endpoint
-    # rather than the sum of the five. Mirrors the outer radarr+sonarr
+    # rather than the sum of the calls. Mirrors the outer radarr+sonarr
     # gather in ``fetch_once`` and the qBit ``sync/maindata`` batch pattern.
-    movies, queue, history, profiles, tag_labels = await asyncio.gather(
+    movies, queue, history, profiles, tag_labels, current = await asyncio.gather(
         arr_client.fetch_movies(client, url, api_key),
         arr_client.fetch_radarr_queue(client, url, api_key),
         arr_client.fetch_radarr_history(client, url, api_key),
         arr_client.fetch_quality_profiles(client, url, api_key),
         arr_client.fetch_tags(client, url, api_key),
+        arr_client.fetch_radarr_current_download_ids(client, url, api_key),
     )
-    return movies, queue, history, profiles, tag_labels
+    return movies, queue, history, profiles, tag_labels, current
 
 
 async def _fetch_sonarr_all(
     client: httpx.AsyncClient, url: str, api_key: str
 ) -> _SonarrFetch:
-    series, queue, history, profiles, tag_labels = await asyncio.gather(
+    series, queue, history, profiles, tag_labels, current = await asyncio.gather(
         arr_client.fetch_series(client, url, api_key),
         arr_client.fetch_sonarr_queue(client, url, api_key),
         arr_client.fetch_sonarr_history(client, url, api_key),
         arr_client.fetch_quality_profiles(client, url, api_key),
         arr_client.fetch_tags(client, url, api_key),
+        arr_client.fetch_sonarr_current_download_ids(client, url, api_key),
     )
-    return series, queue, history, profiles, tag_labels
+    return series, queue, history, profiles, tag_labels, current
 
 
 async def fetch_once(settings: Settings) -> ArrSnapshot:
@@ -109,12 +113,20 @@ async def fetch_once(settings: Settings) -> ArrSnapshot:
             )
         if radarr_task is not None:
             try:
-                movies, r_queue, r_history, r_profiles, r_tags = await radarr_task
+                (
+                    movies,
+                    r_queue,
+                    r_history,
+                    r_profiles,
+                    r_tags,
+                    r_current,
+                ) = await radarr_task
                 snap.movies = list(movies)
                 snap.radarr_queue = dict(r_queue)
                 snap.radarr_history = dict(r_history)
                 snap.quality_profiles_radarr = dict(r_profiles)
                 snap.radarr_tag_labels = dict(r_tags)
+                snap.radarr_current_download_ids = r_current
                 snap.radarr_fetched = True
             except arr_client.ArrUnavailable as exc:
                 logger.warning("arr fetch failed for radarr: %s", exc)
@@ -124,12 +136,20 @@ async def fetch_once(settings: Settings) -> ArrSnapshot:
                 snap.radarr_error = f"unexpected error: {exc}"
         if sonarr_task is not None:
             try:
-                series, s_queue, s_history, s_profiles, s_tags = await sonarr_task
+                (
+                    series,
+                    s_queue,
+                    s_history,
+                    s_profiles,
+                    s_tags,
+                    s_current,
+                ) = await sonarr_task
                 snap.series = list(series)
                 snap.sonarr_queue = dict(s_queue)
                 snap.sonarr_history = dict(s_history)
                 snap.quality_profiles_sonarr = dict(s_profiles)
                 snap.sonarr_tag_labels = dict(s_tags)
+                snap.sonarr_current_download_ids = s_current
                 snap.sonarr_fetched = True
             except arr_client.ArrUnavailable as exc:
                 logger.warning("arr fetch failed for sonarr: %s", exc)

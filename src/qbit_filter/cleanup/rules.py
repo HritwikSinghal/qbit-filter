@@ -89,6 +89,32 @@ def _age_days(ts: int, now: int | None) -> int:
     return max(0, (base - ts) // 86_400)
 
 
+def _pick_arr_current_keeper(
+    bucket: list[Torrent], store: Store
+) -> Torrent | None:
+    """Return the torrent in ``bucket`` that arr currently considers the
+    live import (``ArrMatch.arr_current``), or ``None`` if none qualify.
+
+    arr-current is set by the indexer when the hash is the source of the
+    most-recent ``downloadFolderImported`` event for the owning entity --
+    the file arr has on disk *right now*. After an upgrade, arr drops the
+    older grab from that head, so absence is a direct "leftover" signal.
+
+    When multiple torrents in the bucket are arr-current (rare; usually
+    only happens for Sonarr when a single bucket spans episodes that arr
+    imported from different torrents), the most-recently-added wins so
+    the keeper picks up release-group / indexer metadata from the freshest
+    grab. Bucket order is assumed newest-first by the caller.
+    """
+    if store.arr is None or not store.arr.hash_to_arr:
+        return None
+    for t in bucket:
+        match = store.arr.hash_to_arr.get(t.hash.lower())
+        if match is not None and match.arr_current:
+            return t
+    return None
+
+
 def _partition_by_season(group: Group, store: Store) -> list[list[Torrent]]:
     """Partition a group's torrents into per-season buckets for TV groups.
 
@@ -202,9 +228,18 @@ _FREELEECH_PENALTY_WINDOW_DAYS = 10
 class DuplicateSameQualityRule:
     """Within one group, multiple torrents at the same quality tier.
 
-    Keep the newest (an arr-side upgrade or repack -- arr only re-grabs
-    when it considers the new release better than what's on disk); flag
-    every older same-tier copy. Complementary to
+    Keeper selection (in precedence order):
+
+    1. The arr-current torrent -- whichever copy is backing arr's most
+       recent ``downloadFolderImported`` event. arr drops the old
+       ``downloadId`` from the imported head the moment it imports an
+       upgrade, so this is a definitive "live file on disk" signal that
+       trumps any local heuristic.
+    2. Newest by add date. Used when arr isn't configured, the group
+       isn't matched to an arr entity, or the matched entity has no
+       imported history (e.g. a fresh search that hasn't completed).
+
+    Every non-keeper at the same tier is flagged. Complementary to
     :class:`SupersededQualityRule` -- where that one handles the
     cross-tier case, this one handles the same-tier case.
 
@@ -222,8 +257,8 @@ class DuplicateSameQualityRule:
     slug: str = "duplicate-same-quality"
     label: str = "Duplicate (same quality)"
     description: str = (
-        "Multiple torrents at the same quality tier. Keep the newest copy "
-        "(typically an arr upgrade or repack), flag the older arrivals."
+        "Multiple torrents at the same quality tier. Keep arr's currently "
+        "imported copy (or the newest if arr has no opinion), flag the rest."
     )
     freeleech_window_days: int = _FREELEECH_PENALTY_WINDOW_DAYS
 
@@ -251,10 +286,18 @@ class DuplicateSameQualityRule:
                 for tier, bucket in by_tier.items():
                     if len(bucket) < 2:
                         continue
-                    # Newest first: arr's most recent grab is the keeper.
+                    # Newest first as the tiebreaker fallback. The primary
+                    # keeper signal is arr's currently-imported file: if any
+                    # torrent in the bucket is the source of arr's
+                    # most-recent ``downloadFolderImported`` event for the
+                    # owning entity, arr already considers it the live copy
+                    # and we promote it to keeper. Falls back to "newest" so
+                    # untagged / non-arr groups still flag duplicates.
                     bucket.sort(key=lambda t: t.added_on, reverse=True)
-                    keeper = bucket[0]
-                    for t in bucket[1:]:
+                    keeper = _pick_arr_current_keeper(bucket, store) or bucket[0]
+                    for t in bucket:
+                        if t.hash == keeper.hash:
+                            continue
                         factors: list[ReasonFactor] = [
                             ReasonFactor("tier", tier.value, "neutral"),
                             F.added_gap_factor(t.added_on, keeper.added_on),
@@ -283,13 +326,18 @@ class DuplicateSameQualityRule:
                         gap_days = max(
                             0, abs(t.added_on - keeper.added_on) // 86_400
                         )
+                        direction = (
+                            "before keeper"
+                            if t.added_on <= keeper.added_on
+                            else "after keeper"
+                        )
                         out.append(
                             Candidate(
                                 torrent_hash=t.hash,
                                 group_key=key,
                                 reason=(
                                     f"duplicate {tier.value} "
-                                    f"(added {gap_days}d before keeper)"
+                                    f"(added {gap_days}d {direction})"
                                 ),
                                 keeper_hash=keeper.hash,
                                 factors=tuple(factors),

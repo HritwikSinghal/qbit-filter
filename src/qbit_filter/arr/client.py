@@ -376,6 +376,86 @@ async def fetch_sonarr_history(
     return await _fetch_history(client, url, api_key, entity_field="seriesId")
 
 
+async def _fetch_current_download_ids(
+    client: httpx.AsyncClient,
+    url: str,
+    api_key: str,
+    *,
+    entity_field: str,
+    pages: int = 4,
+    page_size: int = 250,
+) -> frozenset[str]:
+    """Walk recent ``downloadFolderImported`` (eventType=3) events and
+    return the union of the most-recent imported downloadId per entity.
+
+    ``entity_field`` is ``"movieId"`` for Radarr (one file per movie) and
+    ``"episodeId"`` for Sonarr (per-episode granularity, since a series
+    typically pulls files from many torrents -- one per season is the
+    common shape). A descending-by-date scan means the first occurrence
+    we see for a given entity is the current import; we record its
+    downloadId and ignore any earlier entries for the same entity.
+
+    The returned set is the universe of hashes that arr still considers
+    "live" on disk. Any hash *outside* the set is either older media arr
+    has since upgraded or an unimported grab -- the cleanup engine reads
+    this to flag superseded copies even when the cross-tier rule can't
+    (e.g. two 2160p REMUX copies of the same movie, only one still backing
+    arr's file).
+    """
+    base = _base(url)
+    first_seen: set[int] = set()
+    out: set[str] = set()
+    for page in range(1, pages + 1):
+        params = (
+            f"page={page}&pageSize={page_size}"
+            f"&sortKey=date&sortDirection=descending&eventType=3"
+        )
+        try:
+            raw = await _get_json(
+                client, f"{base}/api/v3/history?{params}", api_key
+            )
+        except ArrUnavailable:
+            break
+        records: list[Any]
+        if isinstance(raw, dict) and isinstance(raw.get("records"), list):
+            records = list(raw["records"])
+        elif isinstance(raw, list):
+            records = raw
+        else:
+            break
+        if not records:
+            break
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            entity_id_raw = item.get(entity_field)
+            if not isinstance(entity_id_raw, int) or entity_id_raw == 0:
+                continue
+            if entity_id_raw in first_seen:
+                continue
+            first_seen.add(entity_id_raw)
+            download_id = str(item.get("downloadId") or "").strip().lower()
+            if download_id:
+                out.add(download_id)
+    return frozenset(out)
+
+
+async def fetch_radarr_current_download_ids(
+    client: httpx.AsyncClient, url: str, api_key: str
+) -> frozenset[str]:
+    return await _fetch_current_download_ids(
+        client, url, api_key, entity_field="movieId"
+    )
+
+
+async def fetch_sonarr_current_download_ids(
+    client: httpx.AsyncClient, url: str, api_key: str
+) -> frozenset[str]:
+    return await _fetch_current_download_ids(
+        client, url, api_key, entity_field="episodeId"
+    )
+
+
 async def fetch_tags(
     client: httpx.AsyncClient, url: str, api_key: str
 ) -> dict[int, str]:

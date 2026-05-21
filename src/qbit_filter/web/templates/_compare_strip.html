@@ -22,6 +22,7 @@
                                  preview render only). Set by _group.html.
 #}
 {% set _pre_check_flagged = _pre_check_flagged | default(false) %}
+{% set _arr_matches_local = _arr_matches if _arr_matches is defined else (arr_matches if arr_matches is defined else {}) %}
 <div class="compare-strip">
   <div class="compare-col keeper">
     <div class="compare-col-head">
@@ -31,6 +32,7 @@
     {% for keeper in keepers %}
       {% set _keeper_tier = keeper.quality.tier.value %}
       {% set _keeper_tier_class = 'tier-unknown' if _keeper_tier == 'unknown' else 'tier-' + _keeper_tier.rstrip('p').lower() %}
+      {% set _keeper_arr = _arr_matches_local.get(keeper.hash) %}
       <div class="torrent-row compare-row keeper-row {{ _keeper_tier_class }}"
            data-hash="{{ keeper.hash }}"
            data-state="{{ keeper.state.value }}"
@@ -50,6 +52,9 @@
             <span data-bytes="{{ keeper.size }}">{{ (keeper.size / 1073741824) | round(2) }} GB</span>
             <span>R {{ '%.2f' | format(keeper.ratio) }}</span>
             {% if keeper.added_on %}<span>{{ keeper.added_on | fmt_date }}</span>{% endif %}
+            {% if _keeper_arr and _keeper_arr.arr_current %}
+              <span class="arr-chip arr-current" title="Backs {{ _keeper_arr.source | capitalize }}'s most recent imported file -- the copy arr considers live on disk">arr live</span>
+            {% endif %}
           </span>
         </div>
       </div>
@@ -65,6 +70,7 @@
       {% set _severity = (rule_severity | default({})).get(t.hash, '') %}
       {% set _tier = t.quality.tier.value %}
       {% set _tier_class = 'tier-unknown' if _tier == 'unknown' else 'tier-' + _tier.rstrip('p').lower() %}
+      {% set _flagged_arr = _arr_matches_local.get(t.hash) %}
       <div id="torrent-{{ t.hash }}"
            class="torrent-row compare-row flagged-row {{ _tier_class }}"
            data-hash="{{ t.hash }}"
@@ -90,6 +96,9 @@
             <span data-bytes="{{ t.size }}">{{ (t.size / 1073741824) | round(2) }} GB</span>
             <span>R {{ '%.2f' | format(t.ratio) }}</span>
             {% if t.added_on %}<span>{{ t.added_on | fmt_date }}</span>{% endif %}
+            {% if _flagged_arr and _flagged_arr.arr_current %}
+              <span class="arr-chip arr-current" title="Backs {{ _flagged_arr.source | capitalize }}'s most recent imported file -- the copy arr considers live on disk">arr live</span>
+            {% endif %}
           </span>
           {% if factors %}
             <span class="reason-factors">

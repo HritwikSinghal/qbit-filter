@@ -1517,17 +1517,18 @@ def _render_delta_events(
             rule_factors=rule_factors.get(gk, {}),
             rule_severity=rule_severity.get(gk, {}),
         )
-        # New cards go into #groups via afterbegin; existing card lookups
-        # using outerHTML would silently no-op for a brand-new id. Adding
-        # qf-enter triggers the entrance animation -- only freshly inserted
-        # cards animate; the initial page render and filter-driven redraws
-        # do not.
+        # New cards go in at the END of #groups so existing cards keep
+        # their vertical position -- inserting at top (``afterbegin``) made
+        # every visible card shift down on each delta tick, which read as
+        # the page "jumping". Canonical sort order is restored on the
+        # next RESYNC; for in-session adds the new card joins the bottom
+        # with the qf-enter animation so the user notices it.
         card_html = card_html.replace(
             'class="group-card"', 'class="group-card qf-enter"', 1
         )
         parts.append(card_html.replace(
             f'id="group-{slug}"',
-            f'id="group-{slug}" hx-swap-oob="afterbegin:#groups"',
+            f'id="group-{slug}" hx-swap-oob="beforeend:#groups"',
             1,
         ))
 

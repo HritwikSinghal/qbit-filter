@@ -68,6 +68,7 @@ def _movie_match(
     queue: QueueRecord | None = None,
     history: HistoryMeta | None = None,
     tag_labels: dict[int, str],
+    arr_current: bool = False,
 ) -> ArrMatch:
     return ArrMatch(
         source="radarr",
@@ -90,6 +91,7 @@ def _movie_match(
         release_group=history.release_group if history else "",
         indexer=history.indexer if history else "",
         arr_tags=_resolve_tag_labels(m.tags, tag_labels),
+        arr_current=arr_current,
     )
 
 
@@ -100,6 +102,7 @@ def _series_match(
     queue: QueueRecord | None = None,
     history: HistoryMeta | None = None,
     tag_labels: dict[int, str],
+    arr_current: bool = False,
 ) -> ArrMatch:
     # Sonarr doesn't expose a per-series cutoff-met flag; the closest proxy is
     # "every monitored episode has a file AND series is no longer monitored
@@ -127,6 +130,7 @@ def _series_match(
         release_group=history.release_group if history else "",
         indexer=history.indexer if history else "",
         arr_tags=_resolve_tag_labels(s.tags, tag_labels),
+        arr_current=arr_current,
     )
 
 
@@ -169,6 +173,8 @@ def _match_by_tag(
     sonarr_history: dict[str, HistoryMeta],
     radarr_tag_labels: dict[int, str],
     sonarr_tag_labels: dict[int, str],
+    radarr_current: frozenset[str],
+    sonarr_current: frozenset[str],
 ) -> ArrMatch | None:
     h = t.hash.lower()
     for tag in t.tags:
@@ -186,6 +192,7 @@ def _match_by_tag(
                     queue=radarr_queue.get(h),
                     history=radarr_history.get(h),
                     tag_labels=radarr_tag_labels,
+                    arr_current=h in radarr_current,
                 )
             # Tag points at a movie id arr doesn't know about -- the user
             # removed it from Radarr while the qBit torrent stuck around.
@@ -203,6 +210,7 @@ def _match_by_tag(
                     queue=sonarr_queue.get(h),
                     history=sonarr_history.get(h),
                     tag_labels=sonarr_tag_labels,
+                    arr_current=h in sonarr_current,
                 )
             return _orphan_match("sonarr", sid)
     return None
@@ -220,6 +228,8 @@ def _match_by_title(
     sonarr_history: dict[str, HistoryMeta],
     radarr_tag_labels: dict[int, str],
     sonarr_tag_labels: dict[int, str],
+    radarr_current: frozenset[str],
+    sonarr_current: frozenset[str],
 ) -> ArrMatch | None:
     """Fuzzy title fallback. Routes the raw torrent name through guessit
     (cached in ``grouping.parser``) to recover the clean show/movie title
@@ -244,6 +254,7 @@ def _match_by_title(
                 queue=radarr_queue.get(h),
                 history=radarr_history.get(h),
                 tag_labels=radarr_tag_labels,
+                arr_current=h in radarr_current,
             )
     m = movies_by_norm_no_year.get(title_norm)
     if m is not None:
@@ -253,6 +264,7 @@ def _match_by_title(
             queue=radarr_queue.get(h),
             history=radarr_history.get(h),
             tag_labels=radarr_tag_labels,
+            arr_current=h in radarr_current,
         )
     s = series_by_norm.get(title_norm)
     if s is not None:
@@ -262,6 +274,7 @@ def _match_by_title(
             queue=sonarr_queue.get(h),
             history=sonarr_history.get(h),
             tag_labels=sonarr_tag_labels,
+            arr_current=h in sonarr_current,
         )
     return None
 
@@ -303,6 +316,8 @@ def build_index(
     sonarr_history = snapshot.sonarr_history
     radarr_tags = snapshot.radarr_tag_labels
     sonarr_tags = snapshot.sonarr_tag_labels
+    radarr_current = snapshot.radarr_current_download_ids
+    sonarr_current = snapshot.sonarr_current_download_ids
 
     out: dict[str, ArrMatch] = {}
     for t in torrents:
@@ -319,6 +334,8 @@ def build_index(
             sonarr_history=sonarr_history,
             radarr_tag_labels=radarr_tags,
             sonarr_tag_labels=sonarr_tags,
+            radarr_current=radarr_current,
+            sonarr_current=sonarr_current,
         )
         if match is not None:
             out[h] = match
@@ -335,6 +352,7 @@ def build_index(
                     queue=r_queue_rec,
                     history=radarr_history.get(h),
                     tag_labels=radarr_tags,
+                    arr_current=h in radarr_current,
                 )
                 continue
 
@@ -349,6 +367,7 @@ def build_index(
                     queue=s_queue_rec,
                     history=sonarr_history.get(h),
                     tag_labels=sonarr_tags,
+                    arr_current=h in sonarr_current,
                 )
                 continue
 
@@ -363,6 +382,7 @@ def build_index(
                     queue=radarr_queue.get(h),
                     history=r_hist,
                     tag_labels=radarr_tags,
+                    arr_current=h in radarr_current,
                 )
                 continue
 
@@ -377,6 +397,7 @@ def build_index(
                     queue=sonarr_queue.get(h),
                     history=s_hist,
                     tag_labels=sonarr_tags,
+                    arr_current=h in sonarr_current,
                 )
                 continue
 
@@ -393,6 +414,8 @@ def build_index(
                 sonarr_history=sonarr_history,
                 radarr_tag_labels=radarr_tags,
                 sonarr_tag_labels=sonarr_tags,
+                radarr_current=radarr_current,
+                sonarr_current=sonarr_current,
             )
             if match is not None:
                 out[h] = match
