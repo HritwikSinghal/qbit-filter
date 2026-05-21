@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from qbit_filter.cleanup.registry import BY_SLUG, RULES, is_implemented
-from qbit_filter.domain import DomainEvent, EventKind, FilterState, Group, GroupKey
+from qbit_filter.domain import DomainEvent, EventKind, FilterState, Group, GroupKey, Torrent
 from qbit_filter.qbit import actions as qbit_actions
 from qbit_filter.state.store import Store
 from qbit_filter.state.subscribers import Subscription
@@ -859,6 +859,19 @@ def _render_delta_events(
             visible_lookup[gk] = cached
         return cached
 
+    # Filtered torrent lists per group, memoised for the batch. The same
+    # group can be touched by a count chip, an added-group render, and an
+    # added-torrent insert in a single tick; without this each call
+    # re-filters the same hashes.
+    torrents_lookup: dict[GroupKey, list[Torrent]] = {}
+
+    def _torrents(gk: GroupKey) -> list[Torrent]:
+        out = torrents_lookup.get(gk)
+        if out is None:
+            out = torrents_for_group(store, gk, fs)
+            torrents_lookup[gk] = out
+        return out
+
     # Group keys whose count chip we've already emitted in this batch -- we
     # only need one count update per group even if N rows came and went.
     counted: set[GroupKey] = set()
@@ -872,7 +885,7 @@ def _render_delta_events(
         # the rendered row count (group-level visibility allows a group with
         # one matching + one filtered-out torrent; the chip must say "1 item",
         # not "2 items").
-        n = len(torrents_for_group(store, gk, fs))
+        n = len(_torrents(gk))
         label = "1 item" if n == 1 else f"{n} items"
         slug = gk.slug()
         return (
@@ -895,7 +908,7 @@ def _render_delta_events(
         group = store.groups.get(gk)
         if group is None:
             continue
-        torrents = torrents_for_group(store, gk, fs)
+        torrents = _torrents(gk)
         card_html = render.render_group(request, group, torrents, store=store)
         # New cards go into #groups via afterbegin; existing card lookups
         # using outerHTML would silently no-op for a brand-new id. Adding

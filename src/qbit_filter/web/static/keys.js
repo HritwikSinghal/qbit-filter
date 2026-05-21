@@ -130,10 +130,13 @@
     }, 10000);
   };
 
+  /* One listener: `htmx:afterSettle` fires after any swap that settled,
+     including the synthetic swaps applyBatchStaging dispatches on
+     `#groups`. The earlier belt-and-braces `htmx:oobAfterSwap` listener
+     doubled invocation rate under SSE storms with no extra coverage --
+     debounce coalesces them anyway, but the listener overhead itself is
+     not free at ~100 events/sec. */
   document.body.addEventListener('htmx:afterSettle', saveCacheSoon);
-  /* `htmx:oobAfterSwap` covers SSE OOB swaps in case they don't bubble
-     through `afterSettle`. */
-  document.body.addEventListener('htmx:oobAfterSwap', saveCacheSoon);
 
   /* Filter mutations make the cache stale. Drop it before HTMX fires the
      request so a reload mid-filter-change can never hit a polluted cache.
@@ -955,7 +958,9 @@
       if (row.getAttribute('data-marked') !== 'true') {
         row.setAttribute('data-marked', 'true');
       }
-      selection.set(h, rowBytes(row));
+      /* Bytes were captured at check-time and never change for a given
+         torrent; skip the re-read here. The `change` handler is the
+         single source-of-truth for selection.set(h, bytes). */
       dirty = true;
     });
     if (dirty) repaintSelectionFooter();
@@ -971,12 +976,14 @@
     const target = e.detail && e.detail.target;
     if (!target) return;
 
-    if (target.id === 'groups' || target.id === 'rule-bar-slot') {
-      /* On a full #groups / rule-bar replacement, auto-add rule-flagged
-         rows to selection (rule-cleanup UX) and restore focused-row
-         outline by hash. */
-      const scope = target.id === 'groups' ? target : document;
-      scope.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {
+    if (target.id === 'groups') {
+      /* On a full #groups replacement, auto-add rule-flagged rows to
+         selection (rule-cleanup UX) and restore focused-row outline by
+         hash. Rule-bar swaps don't mutate row marks, so they don't need
+         this pass -- the old `|| target.id === 'rule-bar-slot'` branch
+         scoped the scan to `document` and walked all 1310 rows for
+         nothing. */
+      target.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {
         const h = row.getAttribute('data-hash');
         if (h) selection.set(h, rowBytes(row));
         const cb = row.querySelector('.row-check');
@@ -984,7 +991,7 @@
       });
       repaintSelectionFooter();
 
-      if (target.id === 'groups' && focusedHash) {
+      if (focusedHash) {
         const row = document.querySelector(
           '.torrent-row[data-hash="' + CSS.escape(focusedHash) + '"]',
         );
@@ -1083,19 +1090,23 @@
       timer = setTimeout(postViewport, 250);
     }, { rootMargin: '200px 0px' });
 
-    /* IntersectionObserver.observe() on an already-observed node is a no-op,
-       but the surrounding querySelectorAll('.group-card') still walks all
-       622 cards. Under a RESYNC, htmx:oobAfterSwap fires dozens of times per
-       second, so the unconditional re-attach burned a significant chunk of
-       main-thread time. WeakSet keeps already-observed cards out of the
-       observe() loop; the swap-target guard skips the walk entirely when a
-       swap didn't touch #groups (most SSE swaps are per-row OOB updates,
-       not whole-group rewrites, so the existing observers are still valid). */
+    /* IntersectionObserver.observe() on an already-observed node is a
+       no-op, but the surrounding querySelectorAll('.group-card') still
+       walks all 622 cards. Under a per-row TORRENT_CHANGED storm
+       htmx:oobAfterSwap fires hundreds of times per second; the listener
+       on that event was the dominant warm-state cost. New `.group-card`
+       elements only arrive in two paths:
+         1. applyBatchStaging() dispatches a synthetic `htmx:afterSwap`
+            on `#groups` after relaying batched RESYNC cards.
+         2. GROUP_ADDED uses `hx-swap-oob="afterbegin:#groups"`, which
+            HTMX fires with `target === #groups`.
+       Both hit `htmx:afterSwap` with target.id === 'groups', so listening
+       only there covers every real card-insert case. Per-row OOB swaps
+       don't add cards, so attach can skip them entirely. */
     const observed = new WeakSet();
     const attach = (e) => {
       if (e && e.detail && e.detail.target) {
-        const tgt = e.detail.target;
-        if (tgt.id !== 'groups' && !(tgt.closest && tgt.closest('#groups'))) return;
+        if (e.detail.target.id !== 'groups') return;
       }
       document.querySelectorAll('.group-card').forEach((el) => {
         if (observed.has(el)) return;
@@ -1105,6 +1116,5 @@
     };
     document.addEventListener('DOMContentLoaded', attach);
     document.body.addEventListener('htmx:afterSwap', attach);
-    document.body.addEventListener('htmx:oobAfterSwap', attach);
   })();
 })();

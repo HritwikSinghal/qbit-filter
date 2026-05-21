@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from qbit_filter.config import Settings
@@ -24,6 +25,21 @@ from qbit_filter.state.events import EventBus
 from qbit_filter.state.store import Store
 
 logger = logging.getLogger(__name__)
+
+# Fields that change the group-key, the status badge, or any other row
+# property the user reads when deciding what to act on. A delta touching
+# any of these fires TORRENT_CHANGED immediately.
+_STRUCTURAL_FIELDS = frozenset(
+    {"name", "category", "tags", "state", "tracker"}
+)
+
+# Per-torrent transient updates (dlspeed/upspeed/progress/eta/ratio/
+# last_activity/size/added_on) are coalesced to one render every
+# TRANSIENT_COALESCE_SECONDS. qBit polls at 1 s; without this, a busy
+# seedbox emits hundreds of full-row HTML re-renders per second over SSE.
+# The store is still patched on every poll so reads see fresh values --
+# only the event emission is throttled.
+TRANSIENT_COALESCE_SECONDS = 5.0
 
 
 _QBIT_STATE_MAP: dict[str, TorrentStatus] = {
@@ -136,6 +152,9 @@ class Reconciler:
     store: Store
     bus: EventBus
     settings: Settings
+    # Monotonic timestamp of the last TORRENT_CHANGED emitted for each
+    # hash, used to coalesce transient-only updates (see _update).
+    _transient_emit_at: dict[str, float] = field(default_factory=dict)
 
     async def apply(self, delta: MainDataDelta) -> None:
         # Names that will need a guessit parse this tick. Pre-warming the
@@ -187,6 +206,7 @@ class Reconciler:
         self.store.torrents.clear()
         self.store.groups.clear()
         self.store.hash_to_key.clear()
+        self._transient_emit_at.clear()
         for h, raw in delta.added.items():
             t = _torrent_from_raw(h, dict(raw))
             self.store.torrents[h] = t
@@ -263,6 +283,7 @@ class Reconciler:
         patched = _patch_torrent(existing, raw)
         self.store.torrents[h] = patched
         old_key = self.store.hash_to_key[h]
+        is_structural = not _STRUCTURAL_FIELDS.isdisjoint(raw)
         # The only delta fields that can change a group key are name,
         # category, and tags -- skip the reparse for everything else
         # (progress, dlspeed, upspeed, eta, ...). parse() is also lru_cached
@@ -277,10 +298,21 @@ class Reconciler:
                 # no whole-card re-render needed for either side.
                 self._detach(h, old_key)
                 self._attach(h, patched, new_key, new_parsed)
+                self._transient_emit_at.pop(h, None)
                 return
-        # Same-group update: only the torrent row changes. The group card
-        # shows title / year / kind / count -- none of those drift on
-        # speed / progress updates, so this stays a per-row swap.
+        # Same-group update: only the torrent row changes. Structural
+        # changes (state badge, category chip, name) fire immediately;
+        # transient-only ticks (speed/progress/eta/ratio) are coalesced
+        # to one emission per TRANSIENT_COALESCE_SECONDS so a busy
+        # seedbox doesn't flood SSE with row re-renders the user can't
+        # act on. The store mutation above is unchanged, so any
+        # non-event reader sees fresh values either way.
+        now = time.monotonic()
+        if not is_structural:
+            last = self._transient_emit_at.get(h, 0.0)
+            if now - last < TRANSIENT_COALESCE_SECONDS:
+                return
+        self._transient_emit_at[h] = now
         self.bus.publish(
             DomainEvent(kind=EventKind.TORRENT_CHANGED, group_key=old_key, torrent_hash=h)
         )
@@ -288,5 +320,6 @@ class Reconciler:
     def _remove(self, h: str) -> None:
         key = self.store.hash_to_key.pop(h, None)
         self.store.torrents.pop(h, None)
+        self._transient_emit_at.pop(h, None)
         if key is not None:
             self._detach(h, key)

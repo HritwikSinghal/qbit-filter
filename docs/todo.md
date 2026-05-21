@@ -58,6 +58,10 @@
 
 - need to optimize this website. it has horrible performance and the browser lags when all data is loaded. when no data is there, the website is smooth. figure out the choke points and figure out ways to optimise them. we need this website to be as fast as possible. make these as quickly as possible. figure out the handful of things which will cause most amount of speedup.
 
+- have people select multiple items using shift+click and ctrl+click. Also optimize the JS wherever possible. And before running delete or 'delete + purge' (after clicking on the button), show a box window on current page with summary of items being removed and why. This will be confirmation dialog also.
+
+- also, the first boot torrent loading progress is not showing. check for errors in those too. QUICKLY
+
 ## Open
 
 - Make these changes quickly. Dont run tests. we will implement first, fix later.
