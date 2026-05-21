@@ -32,6 +32,10 @@ class Subscription:
     # Used by the SSE renderer to coalesce back-to-back RESYNCs (each is a
     # ~900KB full-page swap; two within a second visibly stutters the UI).
     last_resync_at: float = 0.0
+    # Monotonic timestamp of the last cold-boot RESYNC_PARTIAL emission.
+    # Partials bypass the 1 s RESYNC_COALESCE_INTERVAL but honour a small
+    # floor (RESYNC_PARTIAL_MIN_INTERVAL) to guard against runaway publishers.
+    last_partial_at: float = 0.0
     # Viewport tracking: which group keys this client currently sees (plus
     # overscan). Populated by POST /viewport. notify() uses this to drop
     # per-row events for groups outside the visible window -- the user's

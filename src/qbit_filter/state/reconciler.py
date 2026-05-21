@@ -204,26 +204,6 @@ class Reconciler:
     _transient_emit_at: dict[str, float] = field(default_factory=dict)
 
     async def apply(self, delta: MainDataDelta) -> None:
-        # Names that will need a guessit parse this tick. Pre-warming the
-        # lru_cache off-thread keeps the event loop responsive during a
-        # cold-start full_update (~1310 names x 1-3ms = several seconds
-        # of blocking on first poll without this).
-        names: list[str] = []
-        if delta.full_update:
-            names.extend(
-                str(raw.get("name") or "") for raw in delta.added.values()
-            )
-        else:
-            names.extend(
-                str(raw.get("name") or "") for raw in delta.added.values()
-            )
-            names.extend(
-                str(raw.get("name") or "") for raw in delta.changed.values()
-                if "name" in raw or "category" in raw or "tags" in raw
-            )
-        if names:
-            await asyncio.to_thread(_warm_parse_cache, names)
-
         self.store.categories |= delta.categories_added
         self.store.categories -= delta.categories_removed
         self.store.tags |= delta.tags_added
@@ -237,9 +217,38 @@ class Reconciler:
         self.store.facet_cache = None
 
         if delta.full_update:
-            self._rebuild(delta)
+            # Cold-boot (rid==0) goes through the chunked path so the first
+            # ~200 torrents reach the browser within a few hundred ms instead
+            # of waiting for the full ~1310-torrent rebuild. Reconnect-time
+            # full_updates (rid bumps but store is already populated) use the
+            # one-shot path because they're rarer and a streamed mid-session
+            # rebuild would visibly flash the page.
+            chunk_size = self.settings.qbit_cold_boot_chunk_size
+            should_chunk = (
+                self.store.rid == 0
+                and chunk_size > 0
+                and len(delta.added) > chunk_size
+            )
+            if should_chunk:
+                await self._rebuild_chunked(delta, chunk_size)
+            else:
+                names = [
+                    str(raw.get("name") or "") for raw in delta.added.values()
+                ]
+                if names:
+                    await asyncio.to_thread(_warm_parse_cache, names)
+                self._rebuild(delta)
             self.store.rid = delta.rid
             return
+
+        # Delta path: warm parse cache for changed names before mutating.
+        names = [str(raw.get("name") or "") for raw in delta.added.values()]
+        names.extend(
+            str(raw.get("name") or "") for raw in delta.changed.values()
+            if "name" in raw or "category" in raw or "tags" in raw
+        )
+        if names:
+            await asyncio.to_thread(_warm_parse_cache, names)
 
         for h, raw in delta.added.items():
             self._add(h, dict(raw))
@@ -260,6 +269,61 @@ class Reconciler:
             key, parsed = self._classify(t)
             self._attach(h, t, key, parsed)
         self.bus.publish(DomainEvent(kind=EventKind.RESYNC))
+
+    async def _rebuild_chunked(
+        self, delta: MainDataDelta, chunk_size: int
+    ) -> None:
+        """Cold-boot path: parse + group in chunks, publishing a partial
+        RESYNC after each. The SSE handler treats RESYNC_PARTIAL like RESYNC
+        but bypasses the coalesce window so each chunk reaches the browser
+        as soon as it lands.
+
+        Skips the GROUP_ADDED / TORRENT_ADDED publishes that ``_attach``
+        would normally do -- the per-chunk RESYNC_PARTIAL already covers
+        every group that exists in the store at that point.
+        """
+        self.store.torrents.clear()
+        self.store.groups.clear()
+        self.store.hash_to_key.clear()
+        self._transient_emit_at.clear()
+        items = list(delta.added.items())
+        total = len(items)
+        idx = 0
+        while idx < total:
+            end = min(idx + chunk_size, total)
+            chunk = items[idx:end]
+            # Warm guessit lru_cache for this chunk's names off-loop. With
+            # the chunk size at 200 the per-chunk warm completes in ~50-150 ms
+            # and the event loop yields between chunks so SSE renders can fan
+            # out the previous chunk while this one is parsing.
+            names = [str(raw.get("name") or "") for _, raw in chunk]
+            if names:
+                await asyncio.to_thread(_warm_parse_cache, names)
+            for h, raw in chunk:
+                t = _torrent_from_raw(h, dict(raw))
+                self.store.torrents[h] = t
+                key, parsed = self._classify(t)
+                # Inline _attach without bus.publish -- the RESYNC_PARTIAL
+                # at the end of the chunk covers it.
+                self.store.hash_to_key[h] = key
+                group = self.store.groups.get(key)
+                if group is None:
+                    self.store.groups[key] = Group(
+                        key=key,
+                        title=parsed.title or t.name,
+                        year=key.year,
+                        kind=key.kind,
+                    )
+                self.store.groups[key].torrent_hashes.append(h)
+            # Bump rid per chunk so any concurrent ``count_by_facet`` reader
+            # invalidates and recomputes against the partial-but-consistent
+            # snapshot rather than serving stale counts.
+            self.store.rid += 1
+            self.store.facet_cache = None
+            is_final = end == total
+            kind = EventKind.RESYNC if is_final else EventKind.RESYNC_PARTIAL
+            self.bus.publish(DomainEvent(kind=kind))
+            idx = end
 
     def _classify(self, t: Torrent) -> tuple[GroupKey, ParsedName]:
         """Single ``parse(t.name)`` pass shared between key assignment and

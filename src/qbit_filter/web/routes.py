@@ -35,19 +35,18 @@ logger = logging.getLogger(__name__)
 
 
 SID_COOKIE = "qf_sid"
-CACHE_COOKIE = "qf_has_cache"
-# Bump when the rendered group/row HTML schema changes in a way the
-# SSE-driven row updater can't gracefully handle on a stale cached payload
-# (e.g. new field on every row, new wrapping element, renamed selector).
-# Exposed to the client as ``window.QF_CACHE_VERSION`` so cached HTML from
-# a previous version is discarded on next page load.
-CACHE_VERSION = 6
 SSE_PING_INTERVAL = 15.0  # seconds between keep-alive comments
-# Minimum gap between RESYNC payloads to one client. Each RESYNC re-renders
-# every visible group (~900KB blob), so back-to-back RESYNCs visibly stutter
-# the UI. Coalescing drops subsequent RESYNCs within this window and lets
-# the next non-coalesced one resync state.
+# Minimum gap between full RESYNC payloads to one client. Each RESYNC
+# re-renders every visible group, so back-to-back RESYNCs from the two
+# pollers (qBit + arr ticking close together) visibly stutter the UI.
+# Coalescing drops subsequent RESYNCs within this window. RESYNC_PARTIAL
+# events bypass this guard during cold-boot so chunks stream out.
 RESYNC_COALESCE_INTERVAL = 1.0
+# Floor on RESYNC_PARTIAL pacing. The reconciler's chunk loop is naturally
+# throttled (each chunk's parse takes 50-150 ms) but defend against a
+# runaway publisher by enforcing a minimum gap between consecutive partial
+# renders to the same client.
+RESYNC_PARTIAL_MIN_INTERVAL = 0.1
 
 # Sentinel string inserted into ``index.html`` while in stream mode. Split
 # on this boundary to yield the page chrome before the group cards and the
@@ -222,7 +221,6 @@ def register_routes(app: FastAPI) -> None:
     async def index(
         request: Request,
         qf_sid: str | None = Cookie(default=None),
-        qf_has_cache: str | None = Cookie(default=None),
     ) -> Response:
         store: Store = request.app.state.store
         templates: Jinja2Templates = request.app.state.templates
@@ -230,17 +228,6 @@ def register_routes(app: FastAPI) -> None:
         sub, _sid = _get_or_create_subscription(request, cookie_carrier, qf_sid)
         visible = apply_filters(store, sub.filter_state)
         counts = count_by_facet(store)
-
-        # Skip the (expensive) initial group render when the client tells us
-        # it already has a fresh #groups snapshot in localStorage. Only honour
-        # the hint for the default filter state -- a cached unfiltered list
-        # can't represent a filtered view, so a returning visitor with active
-        # filters gets a full server render. Search is part of FilterState
-        # via active_count, so this naturally covers search too.
-        cache_mode = (
-            qf_has_cache == "1"
-            and filter_parse.active_count(sub.filter_state) == 0
-        )
 
         # Render the page chrome once with a placeholder where the group
         # cards will go. Split on the placeholder to get the bytes that
@@ -263,8 +250,6 @@ def register_routes(app: FastAPI) -> None:
             total_groups=len(store.groups),
             counts=counts,
             active_count=filter_parse.active_count(sub.filter_state),
-            cache_version=CACHE_VERSION,
-            cache_mode=cache_mode,
             stream_mode=True,
             store_arr_configured=arr_configured,
         )
@@ -297,12 +282,7 @@ def register_routes(app: FastAPI) -> None:
 
         async def body() -> AsyncIterator[bytes]:
             yield before.encode("utf-8")
-            if cache_mode:
-                # Client paints #groups from localStorage. Skip the
-                # CPU-heavy group render entirely and let the SSE channel
-                # deliver row-level deltas on top of the cached snapshot.
-                pass
-            elif not visible:
+            if not visible:
                 # Distinguish "store still warming up (no torrents yet)" from
                 # "filter excludes everything". The former hands the screen to
                 # the batched-RESYNC progress block (see static/keys.js
@@ -387,11 +367,10 @@ def register_routes(app: FastAPI) -> None:
             bus.add(sub)
             sub.sse_refs += 1
             # Push an immediate RESYNC into this client's queue so the very
-            # first SSE message replaces #groups with the live snapshot.
-            # Without this, a client that painted stale HTML from
-            # localStorage would keep showing it until a qBit-side change
-            # triggered the reconciler's own RESYNC, which can be minutes
-            # on a quiet instance. Coalesced with concurrent RESYNCs via
+            # first SSE message delivers the live snapshot. Without this, a
+            # client connecting to a quiet qBit instance would stare at the
+            # "Loading torrent list..." placeholder until the next reconciler
+            # tick, which can be minutes apart. Coalesced via
             # ``last_resync_at`` so back-to-back connects don't double-send.
             sub.notify(DomainEvent(kind=EventKind.RESYNC))
             try:
@@ -811,30 +790,54 @@ def _render_event_batch_iter(
     incrementally (adaptive 10/25/50/100... cards per batch) instead of
     blocking on one ~2.5 MB swap. Delta-only batches still yield a single
     deduped payload.
+
+    Cold-boot :class:`EventKind.RESYNC_PARTIAL` events render the same way
+    as RESYNC but skip the coalesce window so each reconciler chunk reaches
+    the browser without being collapsed into a later one. The natural
+    chunk pace (~50-150 ms per chunk for parsing) plus a 100 ms floor
+    guards against runaway publishers.
     """
     has_resync = any(e.kind == EventKind.RESYNC for e in events)
-    # First-boot guard: the SSE handler pushes a synthetic RESYNC on connect
-    # so cached clients get a fresh snapshot. If the qBit poll hasn't returned
-    # yet, the store is still empty -- emitting a RESYNC payload here would
-    # wipe the client-side "Loading torrent list..." progress UI and leave
-    # the user staring at a blank page until the next reconciler tick. Drop
-    # the RESYNC without burning the coalesce window so the post-poll RESYNC
-    # fires normally.
-    if has_resync and not store.torrents:
-        events = [e for e in events if e.kind != EventKind.RESYNC]
+    has_partial = any(e.kind == EventKind.RESYNC_PARTIAL for e in events)
+    # Drop any RESYNC/RESYNC_PARTIAL when the store has no torrents yet --
+    # emitting a snapshot payload against an empty store would wipe the
+    # client-side "Loading torrent list..." progress UI. The reconciler's
+    # first chunk lands data BEFORE its first RESYNC_PARTIAL fires, so this
+    # only affects the synthetic connect-time RESYNC.
+    if (has_resync or has_partial) and not store.torrents:
+        events = [
+            e for e in events
+            if e.kind not in (EventKind.RESYNC, EventKind.RESYNC_PARTIAL)
+        ]
         if not events:
             return
         has_resync = False
-    if has_resync:
+        has_partial = False
+    if has_resync or has_partial:
         now = time.monotonic()
-        if now - sub.last_resync_at >= RESYNC_COALESCE_INTERVAL:
+        # RESYNC_PARTIAL bypasses the 1 s coalesce window but honours a
+        # 100 ms floor. A full RESYNC in the same batch upgrades the
+        # treatment to "full RESYNC" semantics so the canonical-slugs
+        # final batch still lands and the load-progress UI clears.
+        if has_resync:
+            window = RESYNC_COALESCE_INTERVAL
+            last = sub.last_resync_at
+        else:
+            window = RESYNC_PARTIAL_MIN_INTERVAL
+            last = max(sub.last_resync_at, sub.last_partial_at)
+        if now - last >= window:
             sub.last_resync_at = now
-            yield from _emit_resync_batches(request, store, sub)
+            sub.last_partial_at = now
+            is_final = has_resync
+            yield from _emit_resync_batches(request, store, sub, is_final=is_final)
             # The batched snapshot is authoritative; drop any delta events
             # in the same tick. Their state is already reflected.
             return
-        # Coalesce window hit -- drop the RESYNC, let deltas through.
-        events = [e for e in events if e.kind != EventKind.RESYNC]
+        # Throttle window hit -- drop the RESYNC/RESYNC_PARTIAL, let deltas through.
+        events = [
+            e for e in events
+            if e.kind not in (EventKind.RESYNC, EventKind.RESYNC_PARTIAL)
+        ]
         if not events:
             return
 
@@ -847,6 +850,8 @@ def _emit_resync_batches(
     request: Request,
     store: Store,
     sub: Subscription,
+    *,
+    is_final: bool = True,
 ) -> Iterator[str]:
     """Yield batched SSE payloads that incrementally rebuild ``#groups``.
 
@@ -856,13 +861,14 @@ def _emit_resync_batches(
       replace-or-append heuristic so warm RESYNCs swap in-place and cold
       RESYNCs append in sorted order.
     - ``#qf-load-progress`` (OOB innerHTML) carrying the visible progress
-      block. Empty on the final batch so CSS hides it.
+      block. Empty on the final batch of the final RESYNC so CSS hides it.
     - Chrome OOBs (``#active-filters``, ``#filter-facets``) on the first
       batch so headline counts update with the snapshot.
 
-    The final batch carries the canonical ordered group-slug list on
-    ``data-canonical`` so the client can prune any DOM cards no longer
-    in the snapshot.
+    Only the last batch of the FINAL RESYNC carries ``data-final="1"`` and
+    the canonical ordered group-slug list. Cold-boot RESYNC_PARTIALs leave
+    those empty so the client doesn't prune cards that are about to land
+    in the next chunk.
     """
     fs = sub.filter_state
     visible = apply_filters(store, fs)
@@ -886,6 +892,11 @@ def _emit_resync_batches(
     )
 
     if total == 0:
+        if not is_final:
+            # Partial RESYNC fired before any visible groups exist. Skip --
+            # the next partial / final will deliver content. Keep the
+            # client-side loading placeholder visible.
+            return
         # Filter excludes everything (or store empty). Wipe #groups, remove
         # any in-flight progress UI, and let the empty-state template render
         # if the store has any torrents at all.
@@ -906,7 +917,12 @@ def _emit_resync_batches(
         return
 
     canonical_slugs = "|".join(g.key.slug() for g in visible)
-    log_lines: list[str] = [f"Connected -- {total} groups incoming"]
+    header = (
+        f"Connected -- {total} groups incoming"
+        if is_final
+        else f"Connected -- {total} groups so far"
+    )
+    log_lines: list[str] = [header]
 
     idx = 0
     batch_n = 0
@@ -918,7 +934,11 @@ def _emit_resync_batches(
         )
         end = min(idx + size, total)
         is_first = idx == 0
-        is_final = end == total
+        is_last_internal = end == total
+        # Only the last batch of the FINAL RESYNC carries the canonical flag
+        # + slugs. Cold-boot RESYNC_PARTIALs always emit data-final="0" so
+        # the client doesn't prune cards that are about to arrive.
+        carries_final_flag = is_last_internal and is_final
 
         cards = "".join(
             render.render_group(
@@ -937,30 +957,37 @@ def _emit_resync_batches(
         staging = (
             f'<div id="qf-batch-staging" hx-swap-oob="outerHTML" hidden '
             f'data-loaded="{end}" data-total="{total}" '
-            f'data-final="{"1" if is_final else "0"}" '
-            f'data-canonical="{canonical_slugs if is_final else ""}">'
+            f'data-final="{"1" if carries_final_flag else "0"}" '
+            f'data-canonical="{canonical_slugs if carries_final_flag else ""}">'
             f'{cards}'
             f'</div>'
         )
 
         log_lines.append(f"Loaded {end} of {total} groups")
 
-        if is_final:
+        if carries_final_flag:
             # Empty inner content -> CSS :empty hides the block.
             progress = (
                 '<div id="qf-load-progress" hx-swap-oob="innerHTML"></div>'
             )
         else:
-            pct = int(100 * end / total) if total else 0
+            # Within-emission percentage. For partial RESYNCs the
+            # eventual total is unknown, so cap the visual at 95 % so
+            # the bar doesn't briefly read "done" between chunks.
+            raw_pct = int(100 * end / total) if total else 0
+            pct = raw_pct if is_final else min(95, raw_pct)
+            label = (
+                f"Loading torrent list -- {end} of {total} groups"
+                if is_final
+                else f"Loading torrent list -- {end} groups so far"
+            )
             log_html = "".join(
                 f"<li>{line}</li>" for line in log_lines
             )
             progress = (
                 f'<div id="qf-load-progress" hx-swap-oob="innerHTML">'
                 f'<div class="fl-card" role="status" aria-live="polite">'
-                f'<div class="fl-title">'
-                f'Loading torrent list -- {end} of {total} groups'
-                f'</div>'
+                f'<div class="fl-title">{label}</div>'
                 f'<div class="fl-bar">'
                 f'<div class="fl-bar-fill" style="width:{pct}%"></div>'
                 f'</div>'

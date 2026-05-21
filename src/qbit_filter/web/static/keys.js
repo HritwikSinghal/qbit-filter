@@ -1,153 +1,10 @@
 (function () {
-  /* =========================================================================
-     Browser cache for #groups. The server skips its expensive initial group
-     render when the client signals `qf_has_cache=1`; we then paint #groups
-     from localStorage so the user sees the list within ~1 frame instead of
-     waiting 3-5 s for the StreamingResponse to flush 622 cards. SSE delivers
-     row-level deltas (and the occasional full RESYNC) on top of the cached
-     snapshot, keeping it live.
-
-     The cache payload is self-generated HTML from a previous page render of
-     this same origin, but we still parse it via DOMParser rather than
-     innerHTML so any stray <script> tag from a stale cache won't execute
-     and any inline event-handler attribute is dropped before attachment.
-     ========================================================================= */
-  const CACHE_VERSION = window.QF_CACHE_VERSION || 0;
-  const CACHE_KEY = 'qf_groups_cache_v' + CACHE_VERSION;
-  const CACHE_COOKIE = 'qf_has_cache';
-
-  const setCacheCookie = (val) => {
-    if (val) {
-      /* 7-day TTL is generous; the cookie is harmless if it outlives the
-         cache because the server-side ``cache_mode`` branch is gated on
-         the cookie being set AND the FilterState being default. A stale
-         cookie just costs an empty-render trip. */
-      document.cookie = CACHE_COOKIE + '=1; path=/; max-age=' + (60 * 60 * 24 * 7) + '; SameSite=Lax';
-    } else {
-      document.cookie = CACHE_COOKIE + '=; path=/; max-age=0; SameSite=Lax';
-    }
-  };
-  const dropCache = () => {
-    try { localStorage.removeItem(CACHE_KEY); } catch (e) { /* quota / disabled */ }
-    setCacheCookie(false);
-  };
-
-  const paintFromCache = (cached) => {
-    const groups = document.getElementById('groups');
-    if (!groups) return false;
-    /* If a group card is already present, the server is streaming -- bail
-       so we don't double-paint. Checking for .group-card specifically (not
-       firstElementChild) is important because the inline <script> that
-       calls us is itself a child of #groups at this point. */
-    if (groups.querySelector('.group-card')) return false;
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(cached, 'text/html');
-    /* Walk the parsed body's direct children. We only expect <article
-       class="group-card"> nodes (and whitespace text). Skip anything that
-       isn't an article so script/style tags from a stale or corrupted
-       cache are silently dropped. */
-    const frag = document.createDocumentFragment();
-    for (const node of Array.from(doc.body.children)) {
-      if (node.tagName === 'ARTICLE') frag.appendChild(node);
-    }
-    if (!frag.firstChild) return false;
-    groups.appendChild(frag);
-    return true;
-  };
-
-  /* Exposed for the inline call inside <div id="groups">. keys.js is loaded
-     *before* that element so the script can't paint directly here -- the
-     div doesn't exist in the DOM yet at IIFE-execution time. The inline
-     script in index.html runs once the parser is inside #groups, at which
-     point this function can append children to it.
-
-     We only paint when the server told us it's also skipping the group
-     render (`QF_CACHE_MODE` true). Painting against a streaming response
-     would race the parser and produce duplicate cards. */
-  window.qfPaintCache = function () {
-    if (!window.QF_CACHE_MODE) return;
-    try {
-      const cached = localStorage.getItem(CACHE_KEY);
-      if (!cached) { setCacheCookie(false); return; }
-      const ok = paintFromCache(cached);
-      if (!ok) setCacheCookie(false);
-    } catch (e) {
-      console.warn('cache paint failed', e);
-      setCacheCookie(false);
-    }
-  };
-
-  /* Save strategy:
-     - First save fires synchronously on `window.load`. No debounce. This
-       captures the post-stream snapshot BEFORE SSE's RESYNC kicks off the
-       OOB-swap storm; without this, the storm would starve the debounce
-       timer and save would never fire (observed ~50% flake on cold-start
-       probes with a 750 ms debounce).
-     - Subsequent saves (from SSE-driven HTMX swaps) are debounced 5 s.
-       Long enough that a burst of ~50 OOB swaps coalesces into one save;
-       short enough that genuine state changes land in cache within seconds. */
-  const filtersActive = () => {
-    const strip = document.getElementById('active-filters');
-    return !!(strip && strip.querySelector('.active-chip'));
-  };
-
-  /* Cache writes serialise the entire #groups subtree (~900 KB for a
-     1300-torrent catalogue) and then do a synchronous localStorage.setItem.
-     Both steps run on the main thread, so during an SSE storm this can
-     stall input for ~50-150 ms. Wrap the write in requestIdleCallback so it
-     yields to user interaction, and refuse to store payloads above
-     MAX_CACHE_BYTES (rather than throw QuotaExceeded). */
-  const MAX_CACHE_BYTES = 2_000_000;
-
-  const saveCacheNow = () => {
-    if (filtersActive()) { dropCache(); return; }
-    const groups = document.getElementById('groups');
-    if (!groups || !groups.firstElementChild) return;
-    const writer = () => {
-      try {
-        const html = groups.innerHTML;
-        if (html.length > MAX_CACHE_BYTES) { dropCache(); return; }
-        localStorage.setItem(CACHE_KEY, html);
-        setCacheCookie(true);
-      } catch (e) {
-        /* QuotaExceeded / private-browsing -- clean up and bail. */
-        dropCache();
-      }
-    };
-    if (typeof window.requestIdleCallback === 'function') {
-      window.requestIdleCallback(writer, { timeout: 2000 });
-    } else {
-      writer();
-    }
-  };
-
-  let saveTimer = null;
-  const saveCacheSoon = () => {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      saveTimer = null;
-      saveCacheNow();
-    }, 10000);
-  };
-
-  /* One listener: `htmx:afterSettle` fires after any swap that settled,
-     including the synthetic swaps applyBatchStaging dispatches on
-     `#groups`. The earlier belt-and-braces `htmx:oobAfterSwap` listener
-     doubled invocation rate under SSE storms with no extra coverage --
-     debounce coalesces them anyway, but the listener overhead itself is
-     not free at ~100 events/sec. */
-  document.body.addEventListener('htmx:afterSettle', saveCacheSoon);
-
-  /* Filter mutations make the cache stale. Drop it before HTMX fires the
-     request so a reload mid-filter-change can never hit a polluted cache.
-     We also rewrite the ``facet`` parameter to ``not_<facet>`` when the
-     user shift-clicked a facet chip, so the same HTMX hx-vals payload
-     can serve both include and exclude. */
+  /* Shift-click rewrites the ``facet`` parameter to ``not_<facet>`` so the
+     same HTMX hx-vals payload can serve both include and exclude. */
   document.body.addEventListener('htmx:configRequest', (e) => {
     const detail = e.detail;
     const path = detail && detail.path;
     if (typeof path !== 'string' || path.indexOf('/filters') !== 0) return;
-    dropCache();
     const evt = detail.triggeringEvent;
     const params = detail.parameters;
     if (!evt || !evt.shiftKey || !params) return;
@@ -156,19 +13,6 @@
       params.facet = 'not_' + f;
     }
   });
-
-  /* First-load save: immediate snapshot + a debounced follow-up.
-     - Immediate `saveCacheNow` captures whatever is in #groups at load
-       time. On some runs Firefox fires `load` before the stream finishes
-       parsing, so this snapshot can be tiny (~260 bytes).
-     - `saveCacheSoon` queues a 5 s debounced save that the post-RESYNC
-       SSE swap will refresh into a full snapshot. If the immediate save
-       was already complete, this is just a no-op overwrite with the same
-       content; if it was premature, this fixes it. */
-  window.addEventListener('load', () => {
-    saveCacheNow();
-    saveCacheSoon();
-  }, { once: true });
 
   /* =========================================================================
      Batched-RESYNC load progress.
@@ -184,8 +28,8 @@
         any DOM cards no longer in the canonical slug list.
      3. After each batch, re-fire htmx:afterSwap + htmx:oobAfterSwap with
         target=#groups so existing listeners (selection re-apply, viewport
-        observer, marked-row scan, cache save) treat it like a real
-        #groups-targeted swap.
+        observer, marked-row scan) treat it like a real #groups-targeted
+        swap.
      ========================================================================= */
   function buildFlCard(titleText, fillPct) {
     /* DOM construction (no innerHTML) for the "Connecting..." placeholder
@@ -218,10 +62,10 @@
       requestAnimationFrame(setupLoadProgress);
       return;
     }
-    /* Cache paint already inserts cards synchronously before this IIFE
-       returns. If a card is present, the first batch will only swap in
-       updates -- skip the "Connecting" placeholder so the user isn't
-       shown a spinner over content they already have. */
+    /* If a card is already present (warm boot -- the server streamed
+       groups directly into #groups because Store was non-empty at request
+       time), skip the "Loading" placeholder so the user isn't shown a
+       spinner over content they already have. */
     if (groups.querySelector('.group-card')) return;
     progress.replaceChildren(buildFlCard('Loading torrent list...', 5));
 
@@ -288,8 +132,8 @@
     }
 
     /* Fire synthetic events so the existing handlers (selection re-apply,
-       viewport observer, marked-row scan, focused-row restore, cache save)
-       behave as if #groups was the swap target. Dispatched ON #groups so
+       viewport observer, marked-row scan, focused-row restore) behave as
+       if #groups was the swap target. Dispatched ON #groups so
        both e.target and e.detail.target resolve to it -- the existing
        handlers split on both. Otherwise none of them would see the new
        cards (htmx fired its event with the staging div as the target,
@@ -368,17 +212,9 @@
   function rowBytes(row) {
     if (!row) return 0;
     const sizeSpan = row.querySelector('.meta span[data-bytes]');
-    if (sizeSpan) {
-      const n = parseInt(sizeSpan.getAttribute('data-bytes') || '0', 10);
-      return Number.isNaN(n) ? 0 : n;
-    }
-    /* Fallback for cached HTML predating the data-bytes attribute. */
-    const metaSpans = row.querySelectorAll('.meta span');
-    for (const span of metaSpans) {
-      const m = span.textContent && span.textContent.match(/^\s*([\d.]+)\s*GB/);
-      if (m) return parseFloat(m[1]) * 1073741824;
-    }
-    return 0;
+    if (!sizeSpan) return 0;
+    const n = parseInt(sizeSpan.getAttribute('data-bytes') || '0', 10);
+    return Number.isNaN(n) ? 0 : n;
   }
 
   function repaintSelectionFooter() {
@@ -1082,10 +918,9 @@
          <meta id="qf-rule-activation"> OOB so we know this swap is
          the activation; we consume the flag here.
 
-         For non-activation swaps we still pre-check rows that are
-         in the selection Map (covers the cached-snapshot paint case
-         where the rows already exist with data-marked from a prior
-         preview that the user partially unchecked). */
+         For non-activation swaps we still re-apply selection state to
+         freshly rendered rows so the checkboxes don't visibly flicker
+         off during an RESYNC. */
       const activation = document.getElementById('qf-rule-activation');
       if (activation) {
         target.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {

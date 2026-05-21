@@ -196,6 +196,11 @@ class EventKind(Enum):
     GROUP_ADDED = "group_added"
     GROUP_REMOVED = "group_removed"
     RESYNC = "resync"
+    # Cold-boot chunked reconciliation. Emitted per-chunk so SSE clients
+    # paint groups as soon as the first ~200 torrents have been parsed
+    # instead of waiting for the whole snapshot. Bypasses the RESYNC
+    # coalesce window (which would collapse rapid chunks into one).
+    RESYNC_PARTIAL = "resync_partial"
 
 
 @dataclass(frozen=True, slots=True)

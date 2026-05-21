@@ -27,6 +27,14 @@ class Settings(BaseSettings):
 
     poll_interval_seconds: float = 1.0
 
+    # Cold-boot chunked reconciliation. qBit's sync/maindata is one-shot
+    # (~1310 torrents in a single response), so "batched" cold-boot
+    # publishes a partial RESYNC after every N torrents have been parsed
+    # and grouped. The first batch reaches the browser within a few hundred
+    # ms of the qBit response landing; subsequent batches stream as parsing
+    # completes. Set <=0 to disable (one big RESYNC at end, old behaviour).
+    qbit_cold_boot_chunk_size: int = 200
+
     movie_categories: frozenset[str] = Field(default=frozenset({"movies", "films"}))
     tv_categories: frozenset[str] = Field(default=frozenset({"tv", "shows", "anime"}))
 

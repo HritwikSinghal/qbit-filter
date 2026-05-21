@@ -29,10 +29,6 @@
     {# Inline before the streamed group cards so handlers attach immediately
        instead of waiting for DOMContentLoaded -- which under StreamingResponse
        only fires after the whole 600+ group payload arrives. #}
-    <script>
-      window.QF_CACHE_VERSION = {{ cache_version | default(0) | tojson }};
-      window.QF_CACHE_MODE = {{ cache_mode | default(false) | tojson }};
-    </script>
     <script src="/static/keys.js"></script>
 
     <div id="groups-container"
@@ -41,13 +37,6 @@
          sse-swap="message"
          hx-swap="none">
       <div id="groups">
-        {% if cache_mode %}
-        {# Paint the cached group HTML in place. Runs while the parser is
-           inside #groups so document.getElementById('groups') resolves and
-           children can be appended synchronously, before HTMX/SSE even
-           initialise. #}
-        <script>window.qfPaintCache && window.qfPaintCache();</script>
-        {% endif %}
         {% if stream_mode %}
 <!--QF_STREAM_INSERT-->
         {% elif visible_groups %}
