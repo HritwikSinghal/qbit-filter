@@ -41,7 +41,7 @@ CACHE_COOKIE = "qf_has_cache"
 # (e.g. new field on every row, new wrapping element, renamed selector).
 # Exposed to the client as ``window.QF_CACHE_VERSION`` so cached HTML from
 # a previous version is discarded on next page load.
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 SSE_PING_INTERVAL = 15.0  # seconds between keep-alive comments
 # Minimum gap between RESYNC payloads to one client. Each RESYNC re-renders
 # every visible group (~900KB blob), so back-to-back RESYNCs visibly stutter
@@ -557,6 +557,7 @@ def register_routes(app: FastAPI) -> None:
         by_group: dict[GroupKey, dict[str, str]] = {}
         keepers: dict[GroupKey, str] = {}
         factors_by_group: dict[GroupKey, dict[str, tuple[Any, ...]]] = {}
+        severity_by_group: dict[GroupKey, dict[str, str]] = {}
         for c in cands:
             if c.group_key not in store.groups:
                 continue
@@ -571,6 +572,10 @@ def register_routes(app: FastAPI) -> None:
                 continue
             by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.reason
             factors_by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.factors
+            if c.severity != "normal":
+                severity_by_group.setdefault(c.group_key, {})[
+                    c.torrent_hash
+                ] = c.severity
             # Record the keeper once per group. All candidates in a single
             # group share the same keeper (rules pick one per group).
             if c.keeper_hash and c.group_key not in keepers:
@@ -585,6 +590,7 @@ def register_routes(app: FastAPI) -> None:
             rule_marks_by_group=by_group,
             rule_keepers_by_group=keepers,
             rule_factors_by_group=factors_by_group,
+            rule_severity_by_group=severity_by_group,
         )
         return HTMLResponse(html)
 

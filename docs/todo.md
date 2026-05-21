@@ -20,8 +20,7 @@
 ## Done
 
 - [x] **Upgrade-detection bulk select.** Phase 10, session 7. Side-by-
-      side compare strip (KEEPER vs FLAGGED) + structured factor pills
-      + keeper "K" badge + per-group "Select losers" button + `a` key
+      side compare strip (KEEPER vs FLAGGED) + structured factor pills + keeper "K" badge + per-group "Select losers" button + `a` key
       shortcut. Rule is `SupersededQualityRule` in
       `cleanup/rules.py`. Soft undo replaces blocking confirm.
 - [x] **Operator Console UI polish (Phase 10, session 7).** Motion
@@ -65,6 +64,8 @@
 ## Open
 
 - Make these changes quickly. Dont run tests. we will implement first, fix later.
+
+- so now that "superseded quality" filter is working, we need a new filter which is smart enought to check if a movie/show has multiple torrents, and all of them are 4k (or 1080p), then it can select the 1 torrent which can be removed. the condition for it should be: the new torrent was added after old one. both are same quality. (one exception can be if both torrents of movie/show is downloaded within last 10 days, then the one for removal is highlighted in yellow since any freeleech torrents which are not seeded for 10days will add a penalty on your account.)figure out other things yourself. make the filter system extensible so that more such rules can be added easily in future. can radarr/sonarr integration be useful here finally?
 
 - [ ] **Sonarr / Radarr integration.** Prerequisite for posters and
       future automation.

@@ -1,12 +1,14 @@
 {# Single torrent row. Rendered inline inside .group-rows (no <details>).
    Variables: t (Torrent), marked (bool, optional), reason (str, optional),
-               factors (tuple[ReasonFactor], optional), is_keeper (bool, optional).
+               factors (tuple[ReasonFactor], optional), is_keeper (bool, optional),
+               severity (str, optional) -- "warning" tints the whole row yellow.
    Supports legacy `torrent` variable used by render_torrent() (SSE updates). #}
 {% set t = t if t is defined else torrent %}
 {% set _tier = t.quality.tier.value %}
 {% set _tier_class = 'tier-unknown' if _tier == 'unknown' else 'tier-' + _tier.rstrip('p').lower() %}
 {% set _factors = factors | default(()) %}
 {% set _is_keeper = is_keeper | default(false) %}
+{% set _severity = severity | default('') %}
 <div id="torrent-{{ t.hash }}"
      class="torrent-row {{ _tier_class }}{% if _is_keeper %} is-keeper{% endif %}"
      data-hash="{{ t.hash }}"
@@ -14,6 +16,7 @@
      data-tier="{{ _tier }}"
      data-marked="{{ 'true' if marked|default(false) else 'false' }}"
      {% if _is_keeper %}data-keeper="true"{% endif %}
+     {% if _severity %}data-severity="{{ _severity }}"{% endif %}
      {% if marked|default(false) %}title="{{ reason or '' }}"{% endif %}>
   <input type="checkbox"
          class="row-check"

@@ -9,6 +9,7 @@ import logging
 from qbit_filter.cleanup.rules import (
     CrossSeedDuplicateRule,
     DeadTrackerRule,
+    DuplicateSameQualityRule,
     OrphanedOnDiskRule,
     PathCollisionRule,
     RatioMetAndColdRule,
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 RULES: tuple[Rule, ...] = (
     SupersededQualityRule(),
+    DuplicateSameQualityRule(),
     StalledAndOldRule(),
     RatioMetAndColdRule(),
     DeadTrackerRule(),

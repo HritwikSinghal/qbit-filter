@@ -14,11 +14,13 @@ from typing import Literal, Protocol
 from qbit_filter.domain import (
     GroupKey,
     QualityTier,
+    Torrent,
     tier_rank,
 )
 from qbit_filter.state.store import Store
 
-FactorKind = Literal["bad", "good", "neutral"]
+FactorKind = Literal["bad", "good", "neutral", "warning"]
+Severity = Literal["normal", "warning"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +30,9 @@ class ReasonFactor:
     Rendered as a colored pill inline on the row (or in the compare strip).
     ``kind`` drives the colour: ``bad`` (red) = pushes toward removal,
     ``good`` (green) = a redeeming property the user might want to weigh,
-    ``neutral`` (gray) = just a delta worth showing.
+    ``neutral`` (gray) = just a delta worth showing, ``warning`` (yellow)
+    = caution, the user may want to double-check before confirming (e.g.
+    a freshly-added freeleech torrent that hasn't met its seed window).
     """
 
     label: str
@@ -45,6 +49,10 @@ class Candidate:
     rule recommends keeping. Empty string if no obvious sibling.
     ``factors`` is the same reasoning broken into structured pills so the UI
     can colour-code the deltas (added date, ratio, size, tier).
+    ``severity`` is a row-level signal independent of the per-factor colours:
+    ``warning`` tints the whole row yellow to flag "be careful confirming
+    this one" (e.g. would trigger a freeleech penalty). Factor pills carry
+    the *why* details; severity carries the row-level "stop and look" hue.
     """
 
     torrent_hash: str
@@ -52,6 +60,7 @@ class Candidate:
     reason: str
     keeper_hash: str = ""
     factors: tuple[ReasonFactor, ...] = field(default_factory=tuple)
+    severity: Severity = "normal"
 
 
 class Rule(Protocol):
@@ -95,6 +104,8 @@ class SupersededQualityRule:
     )
 
     def candidates(self, store: Store, *, now: int | None = None) -> list[Candidate]:
+        from qbit_filter.cleanup import factors as F
+
         out: list[Candidate] = []
         for key, group in store.groups.items():
             torrents = [
@@ -123,36 +134,20 @@ class SupersededQualityRule:
                     # Treat as intentional (mobile / smaller / language) and
                     # don't second-guess.
                     continue
-                delta_days = max(0, (keeper.added_on - t.added_on) // 86_400)
-                size_delta_gb = (keeper.size - t.size) / 1_073_741_824
                 factors: list[ReasonFactor] = [
                     ReasonFactor(
                         "tier",
                         f"{t.quality.tier.value} → {keeper.quality.tier.value}",
                         "bad",
                     ),
-                    ReasonFactor(
-                        "added",
-                        f"{delta_days}d before keeper",
-                        "bad",
-                    ),
+                    F.added_gap_factor(t.added_on, keeper.added_on),
                 ]
-                if abs(size_delta_gb) >= 0.1:
-                    factors.append(
-                        ReasonFactor(
-                            "size",
-                            f"{'+' if size_delta_gb >= 0 else ''}{size_delta_gb:.1f} GB vs keeper",
-                            "neutral",
-                        )
-                    )
-                if t.ratio > keeper.ratio and t.ratio >= 1.0:
-                    factors.append(
-                        ReasonFactor(
-                            "ratio",
-                            f"{t.ratio:.2f} vs {keeper.ratio:.2f}",
-                            "good",
-                        )
-                    )
+                size_factor = F.size_delta_factor(t.size, keeper.size)
+                if size_factor is not None:
+                    factors.append(size_factor)
+                ratio_factor = F.ratio_redeemer_factor(t, keeper)
+                if ratio_factor is not None:
+                    factors.append(ratio_factor)
                 out.append(
                     Candidate(
                         torrent_hash=t.hash,
@@ -165,6 +160,115 @@ class SupersededQualityRule:
                         factors=tuple(factors),
                     )
                 )
+        return out
+
+
+# Window during which deleting a freeleech torrent typically incurs a
+# tracker-side penalty. Used by ``DuplicateSameQualityRule`` to mark
+# candidates whose pair is *both* freshly added, since dropping the newer
+# one before this window can cost upload credit even when the older copy
+# still seeds. Conservative default; per-tracker freeleech awareness is a
+# followup (see plan: out-of-scope).
+_FREELEECH_PENALTY_WINDOW_DAYS = 10
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateSameQualityRule:
+    """Within one group, multiple torrents at the same quality tier.
+
+    Keep the oldest (it has the longest seed history and is least likely to
+    trigger a freeleech penalty if removed); flag every newer same-tier
+    copy. Complementary to :class:`SupersededQualityRule` -- where that one
+    handles the cross-tier case, this one handles the same-tier case.
+
+    Source / codec mismatches between the keeper and the flagged copy are
+    surfaced as neutral pills so a user keeping both a WEB-DL and a BluRay
+    on purpose can deselect with full context.
+
+    When both the keeper and the flagged copy were added within the last
+    ``freeleech_window_days`` days, the candidate is tagged
+    ``severity="warning"`` and gets an extra ``freeleech`` pill. Tracker
+    penalty for dropping un-seeded freeleech downloads is real, so the
+    yellow row is the "look twice before confirming" signal.
+    """
+
+    slug: str = "duplicate-same-quality"
+    label: str = "Duplicate (same quality)"
+    description: str = (
+        "Multiple torrents at the same quality tier. Keep the oldest copy, "
+        "flag the newer arrivals."
+    )
+    freeleech_window_days: int = _FREELEECH_PENALTY_WINDOW_DAYS
+
+    def candidates(self, store: Store, *, now: int | None = None) -> list[Candidate]:
+        from qbit_filter.cleanup import factors as F
+
+        base = now if now is not None else int(time.time())
+        fl_cutoff = base - self.freeleech_window_days * 86_400
+        out: list[Candidate] = []
+        for key, group in store.groups.items():
+            torrents = [
+                store.torrents[h]
+                for h in group.torrent_hashes
+                if h in store.torrents
+                and store.torrents[h].quality.tier is not QualityTier.UNKNOWN
+            ]
+            if len(torrents) < 2:
+                continue
+            # Bucket by tier value (string), not by full Quality, so a 1080p
+            # WEB-DL and a 1080p BluRay land in the same bucket and we can
+            # surface the source mismatch as a factor pill on the flagged
+            # row rather than silently skipping the comparison.
+            by_tier: dict[QualityTier, list[Torrent]] = {}
+            for t in torrents:
+                by_tier.setdefault(t.quality.tier, []).append(t)
+            for tier, bucket in by_tier.items():
+                if len(bucket) < 2:
+                    continue
+                bucket.sort(key=lambda t: t.added_on)
+                keeper = bucket[0]
+                for t in bucket[1:]:
+                    factors: list[ReasonFactor] = [
+                        ReasonFactor("tier", tier.value, "neutral"),
+                        F.added_gap_factor(t.added_on, keeper.added_on),
+                    ]
+                    factors.extend(F.source_codec_factors(t, keeper))
+                    size_factor = F.size_delta_factor(t.size, keeper.size)
+                    if size_factor is not None:
+                        factors.append(size_factor)
+                    ratio_factor = F.ratio_redeemer_factor(t, keeper)
+                    if ratio_factor is not None:
+                        factors.append(ratio_factor)
+                    in_window = (
+                        keeper.added_on >= fl_cutoff
+                        and t.added_on >= fl_cutoff
+                    )
+                    severity: Severity = "normal"
+                    if in_window:
+                        factors.append(
+                            ReasonFactor(
+                                "freeleech",
+                                f"both <={self.freeleech_window_days}d",
+                                "warning",
+                            )
+                        )
+                        severity = "warning"
+                    gap_days = max(
+                        0, (t.added_on - keeper.added_on) // 86_400
+                    )
+                    out.append(
+                        Candidate(
+                            torrent_hash=t.hash,
+                            group_key=key,
+                            reason=(
+                                f"duplicate {tier.value} "
+                                f"(added {gap_days}d after keeper)"
+                            ),
+                            keeper_hash=keeper.hash,
+                            factors=tuple(factors),
+                            severity=severity,
+                        )
+                    )
         return out
 
 

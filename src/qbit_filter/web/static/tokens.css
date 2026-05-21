@@ -28,6 +28,7 @@
   --danger-soft: rgba(229, 72, 77, 0.14);
   --success: #46a758;
   --warning: #f5a623;
+  --warning-soft: rgba(245, 166, 35, 0.14);
 
   /* Quality tier colors (used on badges + comparison strips) */
   --tier-2160: #b794f6;

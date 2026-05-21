@@ -43,6 +43,7 @@ def render_group(
     rule_marks: dict[str, str] | None = None,
     rule_keeper: str = "",
     rule_factors: dict[str, tuple[ReasonFactor, ...]] | None = None,
+    rule_severity: dict[str, str] | None = None,
 ) -> str:
     seasons = seasons_of(group, store) if store is not None else []
     return _templates(request).get_template("_group.html").render(
@@ -53,6 +54,7 @@ def render_group(
         rule_marks=rule_marks or {},
         rule_keeper=rule_keeper,
         rule_factors=rule_factors or {},
+        rule_severity=rule_severity or {},
     )
 
 
@@ -71,6 +73,7 @@ def render_groups_payload(
     rule_keepers_by_group: dict[GroupKey, str] | None = None,
     rule_factors_by_group: dict[GroupKey, dict[str, tuple[ReasonFactor, ...]]]
     | None = None,
+    rule_severity_by_group: dict[GroupKey, dict[str, str]] | None = None,
 ) -> str:
     """Render the ``#groups`` inner HTML: active-filter strip + group cards.
 
@@ -89,6 +92,9 @@ def render_groups_payload(
     ``rule_keepers_by_group`` carries the rule's recommended keeper hash per
     group (empty string when the rule has no opinion). ``rule_factors_by_group``
     is the structured-pill breakdown of *why* per candidate hash.
+    ``rule_severity_by_group`` is the row-level severity hint per candidate
+    hash; rows whose severity is ``"warning"`` get a yellow tint in addition
+    to the standard flagged styling.
     """
     if visible is None:
         visible = apply_filters(store, fs)
@@ -99,6 +105,7 @@ def render_groups_payload(
             rule_marks = (rule_marks_by_group or {}).get(group.key, {})
             rule_keeper = (rule_keepers_by_group or {}).get(group.key, "")
             rule_factors = (rule_factors_by_group or {}).get(group.key, {})
+            rule_severity = (rule_severity_by_group or {}).get(group.key, {})
             parts.append(
                 tpl.get_template("_group.html").render(
                     request=request,
@@ -110,6 +117,7 @@ def render_groups_payload(
                     rule_marks=rule_marks,
                     rule_keeper=rule_keeper,
                     rule_factors=rule_factors,
+                    rule_severity=rule_severity,
                 )
             )
     else:

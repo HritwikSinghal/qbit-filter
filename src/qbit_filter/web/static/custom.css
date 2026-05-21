@@ -657,6 +657,26 @@ button { font: inherit; cursor: pointer; }
   color: var(--fg-muted);
   border-color: var(--border);
 }
+.factor.warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+  border-color: rgba(245, 166, 35, 0.32);
+}
+
+/* Row-level warning: an extra "look twice before confirming" hue layered
+   on top of the normal flagged styling. Used by rules that detect a
+   tracker-side cost to the removal (e.g. dropping a freshly-grabbed
+   freeleech torrent before its seed window ends). The gradient stays
+   subtle so the flagged-row danger frame still reads as the primary
+   signal in the compare strip. */
+.torrent-row[data-severity="warning"] {
+  background-image: linear-gradient(
+    to right,
+    var(--warning-soft) 0,
+    transparent 32%
+  );
+  border-left: 2px solid var(--warning);
+}
 
 /* Keeper badge -- tiny green 'K' shown on the rule's recommended keeper
    in both the flat row view and inside the compare strip header. */
