@@ -8,7 +8,12 @@ from fastapi.templating import Jinja2Templates
 from qbit_filter.cleanup.rules import ReasonFactor
 from qbit_filter.domain import FilterState, Group, GroupKey, Torrent, tier_rank
 from qbit_filter.state.store import Store
-from qbit_filter.state.views import apply_filters, count_by_facet, seasons_of
+from qbit_filter.state.views import (
+    apply_filters,
+    count_by_facet,
+    seasons_of,
+    torrents_for_group,
+)
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -98,7 +103,9 @@ def render_groups_payload(
                 tpl.get_template("_group.html").render(
                     request=request,
                     group=group,
-                    torrents=_order_torrents_for_display(store.torrents_in(group.key)),
+                    torrents=_order_torrents_for_display(
+                        torrents_for_group(store, group.key, fs)
+                    ),
                     seasons=seasons_of(group, store),
                     rule_marks=rule_marks,
                     rule_keeper=rule_keeper,

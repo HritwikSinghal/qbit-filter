@@ -27,6 +27,7 @@ from qbit_filter.state.views import (
     group_matches,
     seasons_of,
     torrent_matches,
+    torrents_for_group,
 )
 from qbit_filter.web import filter_parse, render
 
@@ -40,7 +41,7 @@ CACHE_COOKIE = "qf_has_cache"
 # (e.g. new field on every row, new wrapping element, renamed selector).
 # Exposed to the client as ``window.QF_CACHE_VERSION`` so cached HTML from
 # a previous version is discarded on next page load.
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 SSE_PING_INTERVAL = 15.0  # seconds between keep-alive comments
 # Minimum gap between RESYNC payloads to one client. Each RESYNC re-renders
 # every visible group (~900KB blob), so back-to-back RESYNCs visibly stutter
@@ -210,11 +211,13 @@ def register_routes(app: FastAPI) -> None:
         group_tpl = templates.get_template("_group.html")
         empty_tpl = templates.get_template("_empty.html")
 
+        fs = sub.filter_state
+
         def _render_group(group: Group) -> str:
             return group_tpl.render(
                 request=request,
                 group=group,
-                torrents=store.torrents_in(group.key),
+                torrents=torrents_for_group(store, group.key, fs),
                 seasons=seasons_of(group, store),
             )
 
@@ -647,6 +650,18 @@ def _render_event_batch_iter(
     deduped payload.
     """
     has_resync = any(e.kind == EventKind.RESYNC for e in events)
+    # First-boot guard: the SSE handler pushes a synthetic RESYNC on connect
+    # so cached clients get a fresh snapshot. If the qBit poll hasn't returned
+    # yet, the store is still empty -- emitting a RESYNC payload here would
+    # wipe the client-side "Loading torrent list..." progress UI and leave
+    # the user staring at a blank page until the next reconciler tick. Drop
+    # the RESYNC without burning the coalesce window so the post-poll RESYNC
+    # fires normally.
+    if has_resync and not store.torrents:
+        events = [e for e in events if e.kind != EventKind.RESYNC]
+        if not events:
+            return
+        has_resync = False
     if has_resync:
         now = time.monotonic()
         if now - sub.last_resync_at >= RESYNC_COALESCE_INTERVAL:
@@ -737,7 +752,7 @@ def _emit_resync_batches(
             render.render_group(
                 request,
                 g,
-                store.torrents_in(g.key),
+                torrents_for_group(store, g.key, fs),
                 store=store,
             )
             for g in visible[idx:end]
@@ -853,7 +868,11 @@ def _render_delta_events(
         if group is None or gk in counted:
             return ""
         counted.add(gk)
-        n = len(group.torrent_hashes)
+        # Count torrents that survive the active filter so the chip matches
+        # the rendered row count (group-level visibility allows a group with
+        # one matching + one filtered-out torrent; the chip must say "1 item",
+        # not "2 items").
+        n = len(torrents_for_group(store, gk, fs))
         label = "1 item" if n == 1 else f"{n} items"
         slug = gk.slug()
         return (
@@ -876,7 +895,7 @@ def _render_delta_events(
         group = store.groups.get(gk)
         if group is None:
             continue
-        torrents = store.torrents_in(gk)
+        torrents = torrents_for_group(store, gk, fs)
         card_html = render.render_group(request, group, torrents, store=store)
         # New cards go into #groups via afterbegin; existing card lookups
         # using outerHTML would silently no-op for a brand-new id. Adding
@@ -902,6 +921,15 @@ def _render_delta_events(
         t = store.torrents.get(h)
         if t is None:
             continue
+        if not torrent_matches(t, fs):
+            # Was visible (or might have been); the change (category/tag/etc.)
+            # makes it fail the filter now. Remove from DOM -- delete OOB is a
+            # no-op if the row was already hidden.
+            parts.append(
+                f'<div id="torrent-{t.hash}" hx-swap-oob="delete"></div>'
+            )
+            parts.append(_count_oob(gk))
+            continue
         row = render.render_torrent(request, t)
         parts.append(row.replace(
             f'id="torrent-{t.hash}"',
@@ -914,6 +942,11 @@ def _render_delta_events(
             continue
         t = store.torrents.get(h)
         if t is None:
+            continue
+        if not torrent_matches(t, fs):
+            # New torrent in a visible group, but the user's filter excludes
+            # it -- e.g. a cross-seed copy showing up while ``not_tags`` has
+            # ``cross-seed``. Don't render the row.
             continue
         slug = gk.slug()
         row = render.render_torrent(request, t)

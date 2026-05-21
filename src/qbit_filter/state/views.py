@@ -34,22 +34,31 @@ def torrent_matches(t: Torrent, fs: FilterState) -> bool:
 
 
 def _group_passes(group: Group, store: Store, fs: FilterState) -> bool:
+    # Fast fail: not enough raw torrents to ever satisfy ``min_torrents``.
     if fs.min_torrents > 1 and len(group.torrent_hashes) < fs.min_torrents:
         return False
     search = fs.search.strip().lower()
     if search and search not in group.title.lower():
         return False
-    has_any = (
+    has_facet = (
         fs.statuses or fs.categories or fs.tags or fs.trackers
         or fs.not_statuses or fs.not_categories
         or fs.not_tags or fs.not_trackers
     )
-    if not has_any:
-        return True
+    required = max(1, fs.min_torrents)
+    if not has_facet:
+        return len(group.torrent_hashes) >= required
+    # Count torrents matching the active facets and require at least
+    # ``required`` to keep ``min_torrents`` consistent with the filtered
+    # render (a group with one matching + one filtered-out torrent must
+    # not pass ``multiple torrents only``).
+    matching = 0
     for h in group.torrent_hashes:
         t = store.torrents.get(h)
         if t is not None and torrent_matches(t, fs):
-            return True
+            matching += 1
+            if matching >= required:
+                return True
     return False
 
 
@@ -60,6 +69,35 @@ def apply_filters(store: Store, fs: FilterState) -> list[Group]:
     """
     out = [g for g in store.groups.values() if _group_passes(g, store, fs)]
     out.sort(key=lambda g: g.title.lower())
+    return out
+
+
+def torrents_for_group(
+    store: Store, key: GroupKey, fs: FilterState
+) -> list[Torrent]:
+    """Return torrents in a group that match ``fs`` at the torrent level.
+
+    Group visibility is decided per-group by :func:`_group_passes` (a group
+    is visible if at least one of its torrents matches). Once visible, the
+    rendered rows must still be filtered torrent-by-torrent -- otherwise a
+    mixed group (e.g. one ``radarr`` torrent + one ``cross-seed`` torrent)
+    would surface the rows the user explicitly filtered out.
+    """
+    group = store.groups.get(key)
+    if group is None:
+        return []
+    has_facet = (
+        fs.statuses or fs.categories or fs.tags or fs.trackers
+        or fs.not_statuses or fs.not_categories
+        or fs.not_tags or fs.not_trackers
+    )
+    if not has_facet:
+        return [store.torrents[h] for h in group.torrent_hashes if h in store.torrents]
+    out: list[Torrent] = []
+    for h in group.torrent_hashes:
+        t = store.torrents.get(h)
+        if t is not None and torrent_matches(t, fs):
+            out.append(t)
     return out
 
 
