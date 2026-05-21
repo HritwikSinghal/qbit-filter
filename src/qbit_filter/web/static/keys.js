@@ -336,25 +336,148 @@
     repaintSelectionFooter();
   });
 
-  async function applyDelete(purge) {
-    const hashes = Array.from(selection.keys());
-    if (hashes.length === 0) return;
-    const ok = confirm(`Delete ${hashes.length} torrent(s)${purge ? ' AND their files on disk' : ''}?`);
-    if (!ok) return;
+  /* =========================================================================
+     Bulk delete: buffered undo toast instead of a blocking confirm().
+     Industry pattern (Gmail / Linear / Superhuman). The qBit request fires
+     after a grace window unless the user clicks Undo or presses `u`. If a
+     second delete kicks off during the window, the first one commits
+     immediately (FIFO) so we never overlap pending actions.
+     ========================================================================= */
+  const UNDO_WINDOW_MS = 8000;
+  let pending = null; // { hashes, purge, sizeBytes, commitAt, timer, controller }
+
+  async function commitPending(send = true) {
+    if (!pending) return;
+    /* Undo path: un-dim the soft-hidden rows before we drop the pending
+     * reference so they snap back to normal instead of vanishing after
+     * the SSE poll catches up. */
+    if (!send) restorePendingRows();
+    const p = pending;
+    pending = null;
+    if (p.timer) { clearTimeout(p.timer); p.timer = null; }
+    hideUndoToast();
+    if (!send) return;
     const body = new URLSearchParams();
-    body.set('hashes', hashes.join('|'));
-    body.set('purge', purge ? '1' : '0');
-    let res;
+    body.set('hashes', p.hashes.join('|'));
+    body.set('purge', p.purge ? '1' : '0');
     try {
-      res = await fetch('/torrents/bulk/cleanup', { method: 'POST', body });
+      const res = await fetch('/torrents/bulk/cleanup', { method: 'POST', body });
+      if (!res.ok) alert('Cleanup failed: HTTP ' + res.status);
     } catch (err) {
       alert('Cleanup failed: ' + err);
-      return;
     }
-    if (!res.ok) { alert('Cleanup failed: HTTP ' + res.status); return; }
+  }
+
+  function hideUndoToast() {
+    const t = document.getElementById('undo-toast');
+    if (!t) return;
+    t.dataset.active = 'false';
+    t.removeAttribute('data-paused');
+  }
+
+  function showUndoToast(count, sizeBytes, purge) {
+    const t = document.getElementById('undo-toast');
+    if (!t) return;
+    const countEl = document.getElementById('undo-count');
+    const sizeEl = document.getElementById('undo-size');
+    const purgeTag = document.getElementById('undo-purge-tag');
+    if (countEl) countEl.textContent = String(count);
+    if (sizeEl) sizeEl.textContent = (sizeBytes / 1073741824).toFixed(2);
+    if (purgeTag) purgeTag.hidden = !purge;
+    /* Force the progress-bar animation to restart cleanly. Toggling data-active
+       off then on schedules the rule that runs the keyframes without picking
+       up the previous run's elapsed time. */
+    t.dataset.active = 'false';
+    t.removeAttribute('data-paused');
+    /* eslint-disable-next-line no-unused-expressions */
+    t.offsetWidth; // reflow
+    t.dataset.active = 'true';
+  }
+
+  function applyDelete(purge) {
+    const hashes = Array.from(selection.keys());
+    if (hashes.length === 0) return;
+    let sizeBytes = 0;
+    for (const b of selection.values()) sizeBytes += b;
+    /* If a previous delete is still pending, fire it now (FIFO) so we never
+       have two outstanding bulk actions. The selection footer was already
+       hidden after the previous click. */
+    if (pending) commitPending(true);
+    /* Soft-hide the marked rows so the toast doesn't compete with them
+       visually. Keeping them in the DOM means Undo can restore instantly
+       without a 1-3 s SSE round-trip. The reconciler's TORRENT_REMOVED
+       event will fully delete them once the commit fires. */
+    const dimmed = new Set(hashes);
+    document.querySelectorAll('.torrent-row').forEach((row) => {
+      const h = row.getAttribute('data-hash');
+      if (h && dimmed.has(h)) row.classList.add('qf-pending-delete');
+    });
+    pending = {
+      hashes,
+      purge,
+      sizeBytes,
+      commitAt: Date.now() + UNDO_WINDOW_MS,
+      timer: null,
+    };
+    pending.timer = setTimeout(() => commitPending(true), UNDO_WINDOW_MS);
     selection.clear();
     repaintSelectionFooter();
+    showUndoToast(hashes.length, sizeBytes, purge);
   }
+
+  function restorePendingRows() {
+    if (!pending) return;
+    const restore = new Set(pending.hashes);
+    document.querySelectorAll('.torrent-row.qf-pending-delete').forEach((row) => {
+      const h = row.getAttribute('data-hash');
+      if (h && restore.has(h)) row.classList.remove('qf-pending-delete');
+    });
+  }
+
+  /* Click handler: dedicated to the Undo button so we don't fight the
+     bulk-action delegated click listener below. */
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    if (t.closest('#undo-action')) {
+      e.stopPropagation();
+      commitPending(false); // abort: do not send
+    }
+  });
+
+  /* Hovering the toast pauses the countdown so the user has time to read it
+     without the action firing under their nose. Leaving resumes. The CSS
+     animation handles the visual pause; the JS timer still fires on time,
+     so the maximum extra grace is whatever the user does in <a few hundred
+     ms after un-hovering. Good enough -- the JS timer + CSS bar can drift
+     a frame; we don't try to make them tick-perfect. */
+  document.addEventListener('mouseenter', (e) => {
+    const t = e.target;
+    if (t instanceof Element && t.id === 'undo-toast') {
+      t.setAttribute('data-paused', 'true');
+    }
+  }, true);
+  document.addEventListener('mouseleave', (e) => {
+    const t = e.target;
+    if (t instanceof Element && t.id === 'undo-toast') {
+      t.removeAttribute('data-paused');
+    }
+  }, true);
+
+  /* If the tab is about to be closed mid-window, fire the request via
+     sendBeacon so the user doesn't end up with "I clicked delete but it
+     never happened" surprise. sendBeacon is the only reliable cross-browser
+     way to ship a POST during pagehide. */
+  window.addEventListener('pagehide', () => {
+    if (!pending) return;
+    try {
+      const body = new URLSearchParams();
+      body.set('hashes', pending.hashes.join('|'));
+      body.set('purge', pending.purge ? '1' : '0');
+      navigator.sendBeacon('/torrents/bulk/cleanup', body);
+    } catch (e) { /* old browser -- best effort */ }
+    pending = null;
+  });
 
   function clearSelection() {
     selection.clear();
@@ -447,10 +570,204 @@
   document.addEventListener('DOMContentLoaded', repaintSelectionFooter);
 
   /* =========================================================================
-     Keyboard shortcuts.
-     - `/` focuses the search input.
-     - Escape closes the drawer, clears selection, or blurs search.
+     Keyboard shortcuts + focused-row cursor + selection helpers.
+
+     The user is triaging 600+ groups -- mouse-only doesn't scale. Bindings
+     follow cross-tool conventions (Linear / Gmail / GitHub):
+       j/k        next/prev row
+       J/K        next/prev group
+       x/Space    toggle focused row
+       Shift+X    range select from last anchor
+       Ctrl+A     select all visible
+       a          select rule-flagged rows in focused group
+       i          invert selection
+       Enter      delete (keep files)
+       u          undo pending delete
+       1..9       activate Nth rule chip
+       ?          toggle cheatsheet
+       /          focus search   (already wired)
+       Esc        cancel / close (already wired)
      ========================================================================= */
+
+  let focusedHash = null;       // hash of the row currently keyboard-focused
+  let rangeAnchorHash = null;   // anchor for Shift+X range select
+
+  function visibleRows() {
+    return Array.from(document.querySelectorAll('#groups .torrent-row'));
+  }
+  function visibleGroups() {
+    return Array.from(document.querySelectorAll('#groups .group-card'));
+  }
+
+  function setFocusedRow(row) {
+    if (!row) return;
+    document.querySelectorAll('.torrent-row[data-focused="true"]').forEach((r) => {
+      if (r !== row) r.removeAttribute('data-focused');
+    });
+    row.setAttribute('data-focused', 'true');
+    focusedHash = row.getAttribute('data-hash');
+    row.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+  }
+
+  function focusedRowIndex(rows) {
+    if (!focusedHash) return -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-hash') === focusedHash) return i;
+    }
+    return -1;
+  }
+
+  function moveFocus(delta) {
+    const rows = visibleRows();
+    if (rows.length === 0) return;
+    const idx = focusedRowIndex(rows);
+    const next = idx < 0
+      ? (delta > 0 ? 0 : rows.length - 1)
+      : Math.max(0, Math.min(rows.length - 1, idx + delta));
+    setFocusedRow(rows[next]);
+  }
+
+  function moveGroup(delta) {
+    const groups = visibleGroups();
+    if (groups.length === 0) return;
+    const rows = visibleRows();
+    const idx = focusedRowIndex(rows);
+    /* Find the group containing the currently focused row; if none, jump
+       to first/last group. */
+    let currentGroup = -1;
+    if (idx >= 0) {
+      const card = rows[idx].closest('.group-card');
+      currentGroup = groups.indexOf(card);
+    }
+    const target = currentGroup < 0
+      ? (delta > 0 ? 0 : groups.length - 1)
+      : Math.max(0, Math.min(groups.length - 1, currentGroup + delta));
+    const first = groups[target].querySelector('.torrent-row');
+    if (first) setFocusedRow(first);
+  }
+
+  function toggleRowSelection(row) {
+    if (!row) return;
+    const cb = row.querySelector('.row-check');
+    if (!(cb instanceof HTMLInputElement)) return;
+    cb.checked = !cb.checked;
+    cb.dispatchEvent(new Event('change', { bubbles: true }));
+    rangeAnchorHash = row.getAttribute('data-hash');
+  }
+
+  function rangeSelect(toRow) {
+    if (!toRow) return;
+    const rows = visibleRows();
+    if (!rangeAnchorHash) {
+      /* No anchor yet -- treat current row as the anchor and select it. */
+      toggleRowSelection(toRow);
+      return;
+    }
+    const from = rows.findIndex((r) => r.getAttribute('data-hash') === rangeAnchorHash);
+    const to = rows.findIndex((r) => r === toRow);
+    if (from < 0 || to < 0) { toggleRowSelection(toRow); return; }
+    const [lo, hi] = from < to ? [from, to] : [to, from];
+    for (let i = lo; i <= hi; i++) {
+      const cb = rows[i].querySelector('.row-check');
+      if (cb instanceof HTMLInputElement && !cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+  }
+
+  function selectAllVisible() {
+    const rows = visibleRows();
+    let touched = 0;
+    rows.forEach((row) => {
+      const cb = row.querySelector('.row-check');
+      if (cb instanceof HTMLInputElement && !cb.checked) {
+        cb.checked = true;
+        const h = row.getAttribute('data-hash');
+        if (h) selection.set(h, rowBytes(row));
+        row.setAttribute('data-marked', 'true');
+        touched++;
+      }
+    });
+    if (touched) repaintSelectionFooter();
+  }
+
+  function invertSelection() {
+    const rows = visibleRows();
+    rows.forEach((row) => {
+      /* Skip rule-recommended keepers so an inverted selection doesn't
+         accidentally pick the keeper. The keeper is, by design, the row
+         the user wants to keep. */
+      if (row.getAttribute('data-keeper') === 'true') return;
+      const cb = row.querySelector('.row-check');
+      if (!(cb instanceof HTMLInputElement)) return;
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  }
+
+  function selectLosersInGroup(group) {
+    if (!group) return;
+    const rows = group.querySelectorAll('.torrent-row[data-marked="true"]');
+    rows.forEach((row) => {
+      if (row.getAttribute('data-keeper') === 'true') return;
+      const cb = row.querySelector('.row-check');
+      if (cb instanceof HTMLInputElement && !cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+  }
+
+  function selectAllLosers() {
+    const rows = document.querySelectorAll('#groups .torrent-row[data-marked="true"]');
+    rows.forEach((row) => {
+      if (row.getAttribute('data-keeper') === 'true') return;
+      const cb = row.querySelector('.row-check');
+      if (cb instanceof HTMLInputElement && !cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+  }
+
+  function activateNthRule(n) {
+    const chips = document.querySelectorAll('#rule-bar-slot .rule-chip:not([disabled])');
+    const chip = chips[n - 1];
+    if (chip instanceof HTMLElement) chip.click();
+  }
+
+  function toggleCheatsheet(force) {
+    const cs = document.getElementById('kbd-cheatsheet');
+    if (!cs) return;
+    const open = force !== undefined ? force : cs.dataset.active !== 'true';
+    cs.dataset.active = open ? 'true' : 'false';
+    cs.setAttribute('aria-hidden', open ? 'false' : 'true');
+  }
+
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    if (t.closest('#kbd-close')) { toggleCheatsheet(false); return; }
+    /* Backdrop click closes (target IS the overlay, not the inner card). */
+    if (t.id === 'kbd-cheatsheet') { toggleCheatsheet(false); return; }
+    if (t.closest('#sel-invert')) { e.stopPropagation(); invertSelection(); return; }
+    if (t.closest('#sel-losers')) { e.stopPropagation(); selectAllLosers(); return; }
+    const groupBtn = t.closest('.group-select-losers');
+    if (groupBtn) {
+      e.stopPropagation();
+      const card = groupBtn.closest('.group-card');
+      if (card) selectLosersInGroup(card);
+      return;
+    }
+    /* Row focus follows mouse click on a row body (but not on checkbox /
+       buttons inside the row). */
+    const row = t.closest('.torrent-row');
+    if (row && !(t.closest('.row-check, button, a, input'))) {
+      setFocusedRow(row);
+    }
+  });
+
   document.addEventListener('keydown', (e) => {
     const tag = (e.target && e.target.tagName) || '';
     const typing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
@@ -461,12 +778,87 @@
       return;
     }
     if (e.key === 'Escape') {
+      const cs = document.getElementById('kbd-cheatsheet');
+      if (cs && cs.dataset.active === 'true') { toggleCheatsheet(false); return; }
       const drawer = document.getElementById('filter-drawer');
       if (drawer && drawer.classList.contains('open')) { drawer.classList.remove('open'); return; }
+      if (pending) { commitPending(false); return; }
       if (selection.size > 0) { clearSelection(); return; }
       const search = document.getElementById('search-input');
       if (search && document.activeElement === search) { search.blur(); }
+      return;
     }
+    if (typing) return; // all remaining bindings are single-letter; don't fight inputs
+
+    /* Ctrl/Cmd+A: select all visible. Preventing the default Select-All is
+       only safe when there's something to select; otherwise let the browser
+       do its thing. */
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      const rows = visibleRows();
+      if (rows.length === 0) return;
+      e.preventDefault();
+      selectAllVisible();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return; // ignore other modifier combos
+
+    switch (e.key) {
+      case 'j': case 'ArrowDown':
+        e.preventDefault(); moveFocus(1); break;
+      case 'k': case 'ArrowUp':
+        e.preventDefault(); moveFocus(-1); break;
+      case 'J':
+        e.preventDefault(); moveGroup(1); break;
+      case 'K':
+        e.preventDefault(); moveGroup(-1); break;
+      case 'x': case ' ': {
+        const rows = visibleRows();
+        const idx = focusedRowIndex(rows);
+        if (idx >= 0) { e.preventDefault(); toggleRowSelection(rows[idx]); }
+        break;
+      }
+      case 'X': {
+        const rows = visibleRows();
+        const idx = focusedRowIndex(rows);
+        if (idx >= 0) { e.preventDefault(); rangeSelect(rows[idx]); }
+        break;
+      }
+      case 'a': {
+        const rows = visibleRows();
+        const idx = focusedRowIndex(rows);
+        if (idx >= 0) {
+          const card = rows[idx].closest('.group-card');
+          if (card) { e.preventDefault(); selectLosersInGroup(card); }
+        }
+        break;
+      }
+      case 'i':
+        e.preventDefault(); invertSelection(); break;
+      case 'u':
+        if (pending) { e.preventDefault(); commitPending(false); }
+        break;
+      case 'Enter':
+        if (selection.size > 0) { e.preventDefault(); applyDelete(false); }
+        break;
+      case '?':
+        e.preventDefault(); toggleCheatsheet(); break;
+      default:
+        if (e.key >= '1' && e.key <= '9') {
+          e.preventDefault();
+          activateNthRule(parseInt(e.key, 10));
+        }
+    }
+  });
+
+  /* When the group list re-renders, the previously-focused row may be gone.
+     Try to restore focus by hash; if the hash is missing, drop focus. */
+  document.body.addEventListener('htmx:afterSwap', (e) => {
+    const target = e.detail && e.detail.target;
+    if (!target || target.id !== 'groups') return;
+    if (!focusedHash) return;
+    const row = document.querySelector('.torrent-row[data-hash="' + CSS.escape(focusedHash) + '"]');
+    if (row) row.setAttribute('data-focused', 'true');
+    else focusedHash = null;
   });
 
   /* =========================================================================

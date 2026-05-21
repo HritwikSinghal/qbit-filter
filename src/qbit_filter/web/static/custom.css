@@ -194,7 +194,7 @@ button { font: inherit; cursor: pointer; }
   flex: 1;
 }
 .facet > summary .chevron {
-  transition: transform 200ms ease;
+  transition: transform var(--motion-base) var(--ease-out);
   color: var(--fg-muted);
   font-family: var(--font-mono);
   font-size: var(--t-xs);
@@ -214,7 +214,7 @@ button { font: inherit; cursor: pointer; }
 }
 .first-load.fl-done {
   opacity: 0;
-  transition: opacity 300ms ease-out;
+  transition: opacity var(--motion-slow) var(--ease-out);
 }
 .fl-card {
   max-width: 520px;
@@ -243,7 +243,7 @@ button { font: inherit; cursor: pointer; }
   height: 100%;
   width: 0%;
   background: var(--accent);
-  transition: width 300ms ease-out;
+  transition: width var(--motion-slow) var(--ease-out);
 }
 .fl-log {
   list-style: none;
@@ -528,8 +528,10 @@ button { font: inherit; cursor: pointer; }
   height: var(--row-h);
   padding: 0 12px;
   border-bottom: 1px solid var(--border);
+  border-left: 2px solid var(--tier-color, transparent);
   font-family: var(--font-mono);
   font-size: var(--t-sm);
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
 .torrent-row:last-child {
   border-bottom: none;
@@ -538,9 +540,20 @@ button { font: inherit; cursor: pointer; }
 @media (max-width: 1023px) {
   .torrent-row:last-child { border-bottom-left-radius: var(--radius-md); }
 }
+/* Tier-driven left border + tinted hover. The user's "1080p blue, 4K red"
+   idea, extended to the whole row instead of just the 88px badge. */
+.torrent-row.tier-2160 { --tier-color: var(--tier-2160); --tier-color-soft: var(--tier-2160-soft); }
+.torrent-row.tier-1080 { --tier-color: var(--tier-1080); --tier-color-soft: var(--tier-1080-soft); }
+.torrent-row.tier-720  { --tier-color: var(--tier-720);  --tier-color-soft: var(--tier-720-soft); }
+.torrent-row.tier-sd   { --tier-color: var(--tier-sd);   --tier-color-soft: var(--tier-sd-soft); }
+.torrent-row.tier-unknown { --tier-color: transparent; --tier-color-soft: var(--surface-hi); }
+.torrent-row:hover { background: var(--tier-color-soft, var(--surface-hi)); }
+/* Marked-by-rule wins over tier color: red left border + soft red fill. */
 .torrent-row[data-marked='true'] {
   background: var(--danger-soft);
+  border-left-color: var(--danger);
 }
+.torrent-row[data-marked='true']:hover { background: var(--danger-soft); }
 .torrent-row .name {
   font-family: var(--font-sans);
   font-size: var(--t-md);
@@ -597,6 +610,136 @@ button { font: inherit; cursor: pointer; }
   border-radius: var(--radius-sm);
 }
 
+/* Structured reason factors -- 2-3 colored pills replacing the prose chip.
+   .bad = pushes toward removal, .good = redeeming, .neutral = just a delta. */
+.reason-factors {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.factor {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.factor .factor-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  font-size: 10px;
+}
+.factor.bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: rgba(229, 72, 77, 0.32);
+}
+.factor.good {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: rgba(70, 167, 88, 0.32);
+}
+.factor.neutral {
+  background: var(--surface-hi);
+  color: var(--fg-muted);
+  border-color: var(--border);
+}
+
+/* Keeper badge -- tiny green 'K' shown on the rule's recommended keeper
+   in both the flat row view and inside the compare strip header. */
+.keeper-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  margin-right: 6px;
+  background: var(--success-soft);
+  color: var(--success);
+  border: 1px solid var(--success);
+  border-radius: 3px;
+  text-align: center;
+  vertical-align: 1px;
+}
+
+/* Compare strip -- KEEPER (left) vs FLAGGED (right). Replaces the flat
+   stack inside .group-rows when a rule preview has marked rows AND
+   the rule named a keeper. The strip is the project's primary surface
+   per CLAUDE.md. */
+.compare-host { padding: 0; }
+.compare-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0;
+}
+@media (max-width: 1023px) {
+  .compare-strip { grid-template-columns: 1fr; }
+}
+.compare-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.compare-col + .compare-col { border-left: 1px solid var(--border); }
+@media (max-width: 1023px) {
+  .compare-col + .compare-col { border-left: none; border-top: 1px solid var(--border); }
+}
+.compare-col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+.compare-col-head.danger { color: var(--danger); }
+.compare-col.keeper .torrent-row {
+  border-left: 2px solid var(--success);
+}
+.compare-col.keeper .torrent-row:hover {
+  background: var(--success-soft);
+}
+.compare-col.flagged .torrent-row[data-marked='true'] {
+  /* Already styled by the global rule, but reinforce inside the strip so
+     the user sees the "this is the one we'll remove" signal even after
+     they uncheck/recheck. */
+  border-left: 2px solid var(--danger);
+}
+
+/* "Select losers" button in group meta -- only present when a rule preview
+   has flagged at least one row in this group. */
+.group-select-losers {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 6px;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+.group-select-losers:hover { background: var(--danger-soft); }
+
 /* Selection footer */
 .selection-bar {
   position: fixed;
@@ -611,10 +754,13 @@ button { font: inherit; cursor: pointer; }
   background: var(--bg-base);
   border-top: 1px solid var(--border-strong);
   transform: translateY(100%);
-  transition: transform 200ms ease-out;
+  transition: transform var(--motion-fast) var(--ease-in);
   z-index: 25;
 }
-.selection-bar[data-active='true'] { transform: translateY(0); }
+.selection-bar[data-active='true'] {
+  transform: translateY(0);
+  transition: transform var(--motion-base) var(--ease-out);
+}
 .selection-bar .info { font-family: var(--font-mono); font-size: var(--t-sm); }
 .selection-bar .info strong { color: var(--accent); }
 .selection-bar .actions { display: flex; gap: 8px; }
@@ -671,7 +817,7 @@ button { font: inherit; cursor: pointer; }
     width: 280px;
     z-index: 40;
     transform: translateX(-100%);
-    transition: transform 200ms cubic-bezier(0.2, 0, 0, 1);
+    transition: transform var(--motion-base) var(--ease-out);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   }
   .sidebar.active { transform: translateX(0); }
@@ -691,3 +837,208 @@ button { font: inherit; cursor: pointer; }
 @media (max-width: 1023px) {
   #open-filters { display: inline-flex; }
 }
+
+/* Focused-row outline -- driven by keyboard j/k navigation. Outline-offset
+   negative so the ring sits inside the row bounds and doesn't push siblings. */
+.torrent-row[data-focused='true'] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Keyboard cheatsheet overlay -- toggled by `?`. Sits above everything. */
+.kbd-cheatsheet {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 60;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-in);
+}
+.kbd-cheatsheet[data-active='true'] {
+  display: flex;
+  opacity: 1;
+  transition: opacity var(--motion-base) var(--ease-out);
+}
+.kbd-cheatsheet .kbd-card {
+  width: min(640px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--surface-hi);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 18px 22px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  transform: translateY(8px);
+  transition: transform var(--motion-base) var(--ease-out);
+}
+.kbd-cheatsheet[data-active='true'] .kbd-card { transform: translateY(0); }
+.kbd-cheatsheet .kbd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--t-lg);
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.kbd-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px 24px;
+}
+.kbd-section h4 {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin: 0 0 6px;
+}
+.kbd-section dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+  margin: 0;
+  align-items: center;
+}
+.kbd-section dt {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg);
+}
+.kbd-section dd {
+  font-size: var(--t-sm);
+  color: var(--fg-muted);
+  margin: 0;
+}
+kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+/* Soft-hide rows that are pending bulk-delete. Lets the user see what's
+   about to disappear while the undo toast counts down, without these rows
+   competing for attention. Undo strips this class; commit triggers the
+   reconciler's TORRENT_REMOVED which deletes the row entirely. */
+.torrent-row.qf-pending-delete {
+  opacity: 0.35;
+  filter: grayscale(0.4);
+  transition: opacity var(--motion-base) var(--ease-out),
+              filter var(--motion-base) var(--ease-out);
+  pointer-events: none;
+}
+
+/* Undo toast -- soft safety net for bulk delete. Slides in bottom-right
+   after the user clicks Delete/Purge; the actual qBit request is buffered
+   for --motion-undo-window ms, abortable via the Undo button or `u` key. */
+.undo-toast {
+  position: fixed;
+  bottom: 72px; /* clear of the selection bar (~56px + breathing room) */
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 260px;
+  padding: 10px 14px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg);
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-in),
+              transform var(--motion-fast) var(--ease-in);
+  z-index: 30;
+  overflow: hidden;
+}
+.undo-toast[data-active='true'] {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  transition: opacity var(--motion-base) var(--ease-out),
+              transform var(--motion-base) var(--ease-out);
+}
+.undo-toast .undo-msg { flex: 1; }
+.undo-toast .undo-msg strong { color: var(--danger); font-weight: 600; }
+.undo-toast #undo-action {
+  height: 28px;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+.undo-toast #undo-action:hover { background: var(--accent-soft); }
+.undo-toast .undo-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  transform-origin: left center;
+  transform: scaleX(1);
+  pointer-events: none;
+}
+@keyframes qf-undo-countdown {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+.undo-toast[data-active='true'] .undo-progress {
+  animation: qf-undo-countdown var(--motion-undo-window) linear forwards;
+}
+.undo-toast[data-paused='true'] .undo-progress { animation-play-state: paused; }
+
+/* ----- Motion vocabulary (shared by all bundles) ----- */
+
+/* Row gains data-marked='true' via SSE/HTMX swap. Slide in from right
+   (transform-only -- never width/height) + opacity for a snappy mark cue.
+   Stagger via inline --idx on the row element (capped at 12 by JS). */
+@keyframes qf-row-mark-in {
+  from { transform: translateX(8px); opacity: 0.55; }
+  to   { transform: translateX(0);   opacity: 1; }
+}
+.torrent-row[data-marked='true'] {
+  animation: qf-row-mark-in var(--motion-base) var(--ease-out) both;
+  animation-delay: calc(var(--idx, 0) * 20ms);
+}
+
+/* Auto-checked checkbox pulse: subtle scale tick so users see the
+   pre-selection happen. Pure transform, GPU-accelerated. */
+@keyframes qf-check-pulse {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+.row-check.qf-pulse { animation: qf-check-pulse var(--motion-fast) var(--ease-out); }
+
+/* Rule chips crossfade their pressed state instead of snapping. */
+.rule-chip {
+  transition: background-color var(--motion-fast) var(--ease-standard),
+              color var(--motion-fast) var(--ease-standard),
+              border-color var(--motion-fast) var(--ease-standard);
+}
+
+/* Compare strip fade-in -- opacity only. Slide would be disorienting
+   since the strip replaces the existing flat-row stack in place. */
+@keyframes qf-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.compare-strip { animation: qf-fade-in var(--motion-base) var(--ease-out) both; }

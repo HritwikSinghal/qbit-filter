@@ -40,7 +40,7 @@ CACHE_COOKIE = "qf_has_cache"
 # (e.g. new field on every row, new wrapping element, renamed selector).
 # Exposed to the client as ``window.QF_CACHE_VERSION`` so cached HTML from
 # a previous version is discarded on next page load.
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 SSE_PING_INTERVAL = 15.0  # seconds between keep-alive comments
 # Minimum gap between RESYNC payloads to one client. Each RESYNC re-renders
 # every visible group (~900KB blob), so back-to-back RESYNCs visibly stutter
@@ -538,6 +538,8 @@ def register_routes(app: FastAPI) -> None:
         fs = sub.filter_state
         cands = rule.candidates(store)
         by_group: dict[GroupKey, dict[str, str]] = {}
+        keepers: dict[GroupKey, str] = {}
+        factors_by_group: dict[GroupKey, dict[str, tuple[Any, ...]]] = {}
         for c in cands:
             if c.group_key not in store.groups:
                 continue
@@ -551,6 +553,11 @@ def register_routes(app: FastAPI) -> None:
             if t is None or not torrent_matches(t, fs):
                 continue
             by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.reason
+            factors_by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.factors
+            # Record the keeper once per group. All candidates in a single
+            # group share the same keeper (rules pick one per group).
+            if c.keeper_hash and c.group_key not in keepers:
+                keepers[c.group_key] = c.keeper_hash
         visible = [store.groups[k] for k in by_group]
         visible.sort(key=lambda g: g.title.lower())
         html = render.render_groups_payload(
@@ -559,6 +566,8 @@ def register_routes(app: FastAPI) -> None:
             fs,
             visible=visible,
             rule_marks_by_group=by_group,
+            rule_keepers_by_group=keepers,
+            rule_factors_by_group=factors_by_group,
         )
         return HTMLResponse(html)
 

@@ -8,8 +8,8 @@ user confirms; only on confirm does ``qbit/actions.delete`` run.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Literal, Protocol
 
 from qbit_filter.domain import (
     GroupKey,
@@ -17,6 +17,23 @@ from qbit_filter.domain import (
     tier_rank,
 )
 from qbit_filter.state.store import Store
+
+FactorKind = Literal["bad", "good", "neutral"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReasonFactor:
+    """One structured piece of *why* a torrent was flagged.
+
+    Rendered as a colored pill inline on the row (or in the compare strip).
+    ``kind`` drives the colour: ``bad`` (red) = pushes toward removal,
+    ``good`` (green) = a redeeming property the user might want to weigh,
+    ``neutral`` (gray) = just a delta worth showing.
+    """
+
+    label: str
+    value: str
+    kind: FactorKind = "neutral"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,12 +43,15 @@ class Candidate:
     ``reason`` is a short human-readable phrase shown inline next to the row.
     ``keeper_hash`` is the sibling (better-quality / live tracker / etc) the
     rule recommends keeping. Empty string if no obvious sibling.
+    ``factors`` is the same reasoning broken into structured pills so the UI
+    can colour-code the deltas (added date, ratio, size, tier).
     """
 
     torrent_hash: str
     group_key: GroupKey
     reason: str
     keeper_hash: str = ""
+    factors: tuple[ReasonFactor, ...] = field(default_factory=tuple)
 
 
 class Rule(Protocol):
@@ -103,6 +123,36 @@ class SupersededQualityRule:
                     # Treat as intentional (mobile / smaller / language) and
                     # don't second-guess.
                     continue
+                delta_days = max(0, (keeper.added_on - t.added_on) // 86_400)
+                size_delta_gb = (keeper.size - t.size) / 1_073_741_824
+                factors: list[ReasonFactor] = [
+                    ReasonFactor(
+                        "tier",
+                        f"{t.quality.tier.value} → {keeper.quality.tier.value}",
+                        "bad",
+                    ),
+                    ReasonFactor(
+                        "added",
+                        f"{delta_days}d before keeper",
+                        "bad",
+                    ),
+                ]
+                if abs(size_delta_gb) >= 0.1:
+                    factors.append(
+                        ReasonFactor(
+                            "size",
+                            f"{'+' if size_delta_gb >= 0 else ''}{size_delta_gb:.1f} GB vs keeper",
+                            "neutral",
+                        )
+                    )
+                if t.ratio > keeper.ratio and t.ratio >= 1.0:
+                    factors.append(
+                        ReasonFactor(
+                            "ratio",
+                            f"{t.ratio:.2f} vs {keeper.ratio:.2f}",
+                            "good",
+                        )
+                    )
                 out.append(
                     Candidate(
                         torrent_hash=t.hash,
@@ -112,6 +162,7 @@ class SupersededQualityRule:
                             f"(added {_age_days(keeper.added_on, now)}d later)"
                         ),
                         keeper_hash=keeper.hash,
+                        factors=tuple(factors),
                     )
                 )
         return out
@@ -157,16 +208,23 @@ class StalledAndOldRule:
                 if t.ratio >= self.ratio_threshold:
                     continue
                 age = _age_days(t.added_on, now)
+                factors: list[ReasonFactor] = [
+                    ReasonFactor("age", f"{age}d old", "neutral"),
+                    ReasonFactor("ratio", f"{t.ratio:.2f}", "bad"),
+                ]
                 if idle and not t.is_no_peers:
                     idle_age = _age_days(t.last_activity, now)
                     reason = f"idle {idle_age}d, age {age}d, ratio {t.ratio:.2f}"
+                    factors.insert(0, ReasonFactor("idle", f"{idle_age}d", "bad"))
                 else:
                     reason = f"no peers, age {age}d, ratio {t.ratio:.2f}"
+                    factors.insert(0, ReasonFactor("peers", "0", "bad"))
                 out.append(
                     Candidate(
                         torrent_hash=t.hash,
                         group_key=key,
                         reason=reason,
+                        factors=tuple(factors),
                     )
                 )
         return out
@@ -211,6 +269,10 @@ class RatioMetAndColdRule:
                         f"ratio {t.ratio:.2f} met, cold {cold_days}d "
                         f"(last activity)"
                     )
+                    factors = (
+                        ReasonFactor("ratio", f"{t.ratio:.2f} met", "good"),
+                        ReasonFactor("cold", f"{cold_days}d", "bad"),
+                    )
                 else:
                     # Fallback: no last_activity from qBit. Use the original
                     # instantaneous check + age >= threshold.
@@ -218,15 +280,22 @@ class RatioMetAndColdRule:
                         continue
                     if t.dlspeed > 0 or t.upspeed > 0:
                         continue
+                    age = _age_days(t.added_on, now)
                     reason = (
                         f"ratio {t.ratio:.2f} met, idle, "
-                        f"age {_age_days(t.added_on, now)}d"
+                        f"age {age}d"
+                    )
+                    factors = (
+                        ReasonFactor("ratio", f"{t.ratio:.2f} met", "good"),
+                        ReasonFactor("idle", "now", "bad"),
+                        ReasonFactor("age", f"{age}d", "neutral"),
                     )
                 out.append(
                     Candidate(
                         torrent_hash=t.hash,
                         group_key=key,
                         reason=reason,
+                        factors=factors,
                     )
                 )
         return out

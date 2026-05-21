@@ -19,6 +19,16 @@
 
 ## Done
 
+- [x] **Upgrade-detection bulk select.** Phase 10, session 7. Side-by-
+      side compare strip (KEEPER vs FLAGGED) + structured factor pills
+      + keeper "K" badge + per-group "Select losers" button + `a` key
+      shortcut. Rule is `SupersededQualityRule` in
+      `cleanup/rules.py`. Soft undo replaces blocking confirm.
+- [x] **Operator Console UI polish (Phase 10, session 7).** Motion
+      tokens, tier-color row borders + hover tints (extends user's
+      1080p-blue / 4K-red idea to the whole row), keyboard nav
+      (j/k/J/K/x/Shift+X/Ctrl+A/a/i/u/Enter/1-9/?), cheatsheet
+      overlay, "Invert" + "All losers" selection-bar buttons.
 - [x] High CPU + slow boot time -- Session 3, 2026-05-21. SSE
       subscription leak on disconnect (`routes.py` stream() refcounts +
       bus.remove + drain on exit), 500ms livereload throttled to 5s +
@@ -56,10 +66,13 @@
       future automation.
 - [ ] **Movie / TV posters left of the name** in each row, sourced from
       Sonarr / Radarr metadata. Cache locally.
-- [ ] **Upgrade-detection bulk select.** When a movie / show has both a
-      1080p and 2160p torrent and the 2160p was added later, the 1080p
-      should be selectable for deletion as a bulk operation.
 - [ ] **Dynamic filter rules** to bulk-select torrents. UI with
       reusable axes (date added, quality, size, presence-of-higher-
       quality-in-same-group) that compose into one selection rule. The
-      upgrade-detection task above is one preset of this system.
+      upgrade-detection rule (now shipped) is one preset of this system.
+- [ ] **Confidence sort.** Order rule-matched groups by clear-cut-ness
+      (tier-step delta × log(added-day delta)) so ambiguous matches
+      sink. See Phase 10 plan deferred section.
+- [ ] **Protected tag** (dupeGuru "reference folder" analog). Tag a
+      torrent `keep` to opt it out of every rule.
+- [ ] **Command palette (Cmd-K).** Defer until rule count > 7.

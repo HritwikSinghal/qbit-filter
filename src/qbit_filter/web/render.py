@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from qbit_filter.cleanup.rules import ReasonFactor
 from qbit_filter.domain import FilterState, Group, GroupKey, Torrent, tier_rank
 from qbit_filter.state.store import Store
 from qbit_filter.state.views import apply_filters, count_by_facet, seasons_of
@@ -35,6 +36,8 @@ def render_group(
     *,
     store: Store | None = None,
     rule_marks: dict[str, str] | None = None,
+    rule_keeper: str = "",
+    rule_factors: dict[str, tuple[ReasonFactor, ...]] | None = None,
 ) -> str:
     seasons = seasons_of(group, store) if store is not None else []
     return _templates(request).get_template("_group.html").render(
@@ -43,6 +46,8 @@ def render_group(
         torrents=_order_torrents_for_display(torrents),
         seasons=seasons,
         rule_marks=rule_marks or {},
+        rule_keeper=rule_keeper,
+        rule_factors=rule_factors or {},
     )
 
 
@@ -58,6 +63,9 @@ def render_groups_payload(
     fs: FilterState,
     visible: list[Group] | None = None,
     rule_marks_by_group: dict[GroupKey, dict[str, str]] | None = None,
+    rule_keepers_by_group: dict[GroupKey, str] | None = None,
+    rule_factors_by_group: dict[GroupKey, dict[str, tuple[ReasonFactor, ...]]]
+    | None = None,
 ) -> str:
     """Render the ``#groups`` inner HTML: active-filter strip + group cards.
 
@@ -72,6 +80,10 @@ def render_groups_payload(
     ``rule_marks_by_group`` is set by the cleanup-rule preview endpoint:
     ``{group_key: {torrent_hash: reason}}``. Rows whose hash is in the inner
     dict render pre-selected with the reason chip inline.
+
+    ``rule_keepers_by_group`` carries the rule's recommended keeper hash per
+    group (empty string when the rule has no opinion). ``rule_factors_by_group``
+    is the structured-pill breakdown of *why* per candidate hash.
     """
     if visible is None:
         visible = apply_filters(store, fs)
@@ -80,6 +92,8 @@ def render_groups_payload(
     if visible:
         for group in visible:
             rule_marks = (rule_marks_by_group or {}).get(group.key, {})
+            rule_keeper = (rule_keepers_by_group or {}).get(group.key, "")
+            rule_factors = (rule_factors_by_group or {}).get(group.key, {})
             parts.append(
                 tpl.get_template("_group.html").render(
                     request=request,
@@ -87,6 +101,8 @@ def render_groups_payload(
                     torrents=_order_torrents_for_display(store.torrents_in(group.key)),
                     seasons=seasons_of(group, store),
                     rule_marks=rule_marks,
+                    rule_keeper=rule_keeper,
+                    rule_factors=rule_factors,
                 )
             )
     else:

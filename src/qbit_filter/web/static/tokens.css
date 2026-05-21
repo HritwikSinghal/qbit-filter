@@ -36,6 +36,15 @@
   --tier-sd:   #fbb360;
   --tier-unknown: var(--fg-dim);
 
+  /* Tier-tinted hover backgrounds (~10% opacity of the tier color). Lets the
+     row hover state reinforce the tier identity at a glance. */
+  --tier-2160-soft: rgba(183, 148, 246, 0.10);
+  --tier-1080-soft: rgba(99, 179, 237, 0.10);
+  --tier-720-soft:  rgba(104, 211, 145, 0.10);
+  --tier-sd-soft:   rgba(251, 179, 96, 0.10);
+  --tier-unknown-soft: var(--surface-hi);
+  --success-soft: rgba(70, 167, 88, 0.14);
+
   /* Layout */
   --sidebar-w: 264px;
   --appbar-h: 56px;
@@ -53,6 +62,16 @@
   --t-md: 13px;
   --t-lg: 15px;
   --t-xl: 18px;
+
+  /* Motion -- unified motion vocabulary. Exit transitions should reuse
+     --motion-fast so they feel snappier than enters (research consensus). */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --motion-undo-window: 8000ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
 
   color-scheme: dark;
 }
@@ -74,6 +93,11 @@ body.light {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 1ms;
+    --motion-base: 1ms;
+    --motion-slow: 1ms;
+  }
   *, *::before, *::after {
     animation-duration: 1ms !important;
     transition-duration: 1ms !important;

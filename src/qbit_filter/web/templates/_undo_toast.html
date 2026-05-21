@@ -1,0 +1,13 @@
+{# Soft safety-net toast. Replaces the blocking confirm() modal for bulk
+   delete: action is buffered for ~8 s, user can press Undo (button or `u`
+   key) to abort before the request actually hits qBit. Hidden by default;
+   keys.js flips data-active and supplies the count/size text. #}
+<div id="undo-toast" class="undo-toast" data-active="false" role="status" aria-live="polite">
+  <div class="undo-msg">
+    Deleted <strong id="undo-count">0</strong> torrent(s)
+    (<span id="undo-size">0</span> GB)
+    <span id="undo-purge-tag" hidden>+ files</span>
+  </div>
+  <button id="undo-action" class="btn" type="button">Undo</button>
+  <div class="undo-progress" aria-hidden="true"></div>
+</div>

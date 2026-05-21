@@ -1,14 +1,20 @@
 {# Single torrent row. Rendered inline inside .group-rows (no <details>).
-   Variables: t (Torrent), marked (bool, optional), reason (str, optional).
+   Variables: t (Torrent), marked (bool, optional), reason (str, optional),
+               factors (tuple[ReasonFactor], optional), is_keeper (bool, optional).
    Supports legacy `torrent` variable used by render_torrent() (SSE updates). #}
 {% set t = t if t is defined else torrent %}
 {% set _tier = t.quality.tier.value %}
 {% set _tier_class = 'tier-unknown' if _tier == 'unknown' else 'tier-' + _tier.rstrip('p').lower() %}
+{% set _factors = factors | default(()) %}
+{% set _is_keeper = is_keeper | default(false) %}
 <div id="torrent-{{ t.hash }}"
-     class="torrent-row"
+     class="torrent-row {{ _tier_class }}{% if _is_keeper %} is-keeper{% endif %}"
      data-hash="{{ t.hash }}"
      data-state="{{ t.state.value }}"
-     data-marked="{{ 'true' if marked|default(false) else 'false' }}">
+     data-tier="{{ _tier }}"
+     data-marked="{{ 'true' if marked|default(false) else 'false' }}"
+     {% if _is_keeper %}data-keeper="true"{% endif %}
+     {% if marked|default(false) %}title="{{ reason or '' }}"{% endif %}>
   <input type="checkbox"
          class="row-check"
          aria-label="Select {{ t.name }}"
@@ -17,7 +23,10 @@
   <span class="q-badge {{ _tier_class }}">
     {{ _tier }}{% if t.quality.source %} {{ t.quality.source }}{% endif %}
   </span>
-  <span class="name" title="{{ t.name }}">{{ t.name }}</span>
+  <span class="name" title="{{ t.name }}">
+    {% if _is_keeper %}<span class="keeper-badge" title="Rule's recommended keeper">K</span>{% endif %}
+    {{ t.name }}
+  </span>
   <span class="meta">
     <span data-bytes="{{ t.size }}">{{ (t.size / 1073741824) | round(2) }} GB</span>
     {% if t.category %}<span class="cat">{{ t.category }}</span>{% endif %}
@@ -25,5 +34,16 @@
     <span>R {{ '%.2f' | format(t.ratio) }}</span>
     {% if t.added_on %}<span>{{ t.added_on | fmt_date }}</span>{% endif %}
   </span>
-  {% if reason is defined and reason %}<span class="reason-chip">{{ reason }}</span>{% endif %}
+  {% if _factors %}
+    <span class="reason-factors">
+      {% for f in _factors %}
+        <span class="factor {{ f.kind }}" title="{{ f.label }}: {{ f.value }}">
+          <span class="factor-label">{{ f.label }}</span>
+          <span class="factor-value">{{ f.value }}</span>
+        </span>
+      {% endfor %}
+    </span>
+  {% elif reason is defined and reason %}
+    <span class="reason-chip">{{ reason }}</span>
+  {% endif %}
 </div>

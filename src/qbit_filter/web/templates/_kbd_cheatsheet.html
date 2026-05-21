@@ -1,0 +1,40 @@
+{# Keyboard cheatsheet overlay. Toggled by `?`. Persistent in DOM so the JS
+   can flip its visibility without re-rendering. #}
+<div id="kbd-cheatsheet" class="kbd-cheatsheet" data-active="false" role="dialog" aria-label="Keyboard shortcuts" aria-hidden="true">
+  <div class="kbd-card">
+    <div class="kbd-head">
+      <span>Keyboard shortcuts</span>
+      <button id="kbd-close" class="btn" type="button" aria-label="Close">Esc</button>
+    </div>
+    <div class="kbd-grid">
+      <div class="kbd-section">
+        <h4>Navigation</h4>
+        <dl>
+          <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / prev row</dd>
+          <dt><kbd>J</kbd> / <kbd>K</kbd></dt><dd>Next / prev group</dd>
+          <dt><kbd>/</kbd></dt><dd>Focus search</dd>
+          <dt><kbd>Esc</kbd></dt><dd>Clear / close</dd>
+        </dl>
+      </div>
+      <div class="kbd-section">
+        <h4>Selection</h4>
+        <dl>
+          <dt><kbd>x</kbd> / <kbd>Space</kbd></dt><dd>Toggle focused row</dd>
+          <dt><kbd>Shift</kbd>+<kbd>X</kbd></dt><dd>Range select</dd>
+          <dt><kbd>Ctrl</kbd>+<kbd>A</kbd></dt><dd>Select all visible</dd>
+          <dt><kbd>a</kbd></dt><dd>Select losers in focused group</dd>
+          <dt><kbd>i</kbd></dt><dd>Invert selection</dd>
+        </dl>
+      </div>
+      <div class="kbd-section">
+        <h4>Actions</h4>
+        <dl>
+          <dt><kbd>Enter</kbd></dt><dd>Delete (keep files)</dd>
+          <dt><kbd>u</kbd></dt><dd>Undo pending delete</dd>
+          <dt><kbd>1</kbd>&hellip;<kbd>9</kbd></dt><dd>Activate rule preset</dd>
+          <dt><kbd>?</kbd></dt><dd>Toggle this dialog</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>

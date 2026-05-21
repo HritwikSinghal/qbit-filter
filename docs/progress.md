@@ -1,5 +1,5 @@
 # Project: qbit-filter
-> Last updated: 2026-05-21 | Session: 6
+> Last updated: 2026-05-21 | Session: 7
 
 ## Current state
 
@@ -172,6 +172,29 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim --
 - [ ] 9.5 Nix build verification + dep shims if needed
 - [ ] 9.6 Final acceptance check (tick spec acceptance criteria)
 
+### Phase 10: Rule-cleanup UX (session 7, 2026-05-21)
+- [x] 10.1 Motion tokens (`--motion-fast/base/slow/-undo-window`,
+      `--ease-out/in/standard`) in `tokens.css`; reduced-motion override.
+- [x] 10.2 Tier color discipline -- tier left-border + hover tint on
+      every `.torrent-row` (extends user's "1080p blue / 4K red" idea
+      from the small `.q-badge` to the whole row).
+- [x] 10.3 `ReasonFactor` + structured factor pills replacing the
+      single prose `.reason-chip`. All three implemented rules emit
+      colour-coded factors (bad / good / neutral).
+- [x] 10.4 Side-by-side compare strip in `_compare_strip.html`
+      (KEEPER left, FLAGGED right). Kicks in when a rule preview marks
+      rows AND the rule named a keeper (i.e. SupersededQuality). Other
+      rules fall back to flat rows with factor pills.
+- [x] 10.5 Soft-undo toast replaces the blocking `confirm()` modal.
+      8 s buffered window, hover pauses, `u` aborts, `Esc` aborts,
+      `pagehide` flushes via `sendBeacon`.
+- [x] 10.6 Keyboard navigation: j/k/J/K/x/Shift+X/Ctrl+A/a/i/u/Enter
+      /1-9/? + focused-row outline + cheatsheet overlay.
+- [x] 10.7 Selection bar: "Invert" and "All losers" buttons. Per-group
+      "Select losers" button when a rule preview has flagged rows.
+- [x] 10.8 `CACHE_VERSION` bumped to 2 (schema change: new
+      `data-tier`, `data-keeper`, factor pills, compare strip wrapper).
+
 ## Status Summary
 | Phase | Status | Progress |
 |-------|--------|----------|
@@ -185,6 +208,7 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim --
 | Phase 7: Filters | Done | 1/1 |
 | Phase 8: Actions | Done | 2/2 |
 | Phase 9: Polish + Nix packaging | In progress | 2/7 |
+| Phase 10: Rule-cleanup UX | Done | 8/8 |
 
 ## Significant changes
 

@@ -4,6 +4,8 @@
      torrents        list[Torrent] (already ordered: best quality first)
      seasons         list[int] (TV only; empty for movies)
      rule_marks      dict[str, str]  -- {torrent_hash: reason}; optional
+     rule_keeper     str             -- keeper hash (Bundle 1); optional
+     rule_factors    dict[str, tuple[ReasonFactor, ...]]; optional
 #}
 <article id="group-{{ group.key.slug() }}" class="group-card">
   <div class="group-meta">
@@ -24,13 +26,44 @@
     {% set marked_in_group = rule_marks | default({}) %}
     {% if marked_in_group %}
       <div class="rule-match">{{ marked_in_group | length }} marked for cleanup</div>
+      <button type="button"
+              class="group-select-losers"
+              data-group="{{ group.key.slug() }}"
+              aria-label="Select all losers in this group">Select losers</button>
     {% endif %}
   </div>
-  <div class="group-rows" id="group-{{ group.key.slug() }}-rows">
-    {% for t in torrents %}
-      {% set reason = (rule_marks | default({})).get(t.hash) %}
-      {% set marked = reason is not none %}
-      {% include '_torrent.html' with context %}
-    {% endfor %}
-  </div>
+  {# Compare strip kicks in only when a rule preview marked one or more rows
+     AND the rule named a keeper. Otherwise fall back to the flat row stack
+     (preserves the non-preview view 1:1). #}
+  {% set _keeper_hash = rule_keeper | default('') %}
+  {% set _use_compare = marked_in_group and _keeper_hash %}
+  {% if _use_compare %}
+    {% set keeper = (torrents | selectattr('hash', 'equalto', _keeper_hash) | list | first) %}
+    {% set flagged = torrents | selectattr('hash', 'in', marked_in_group.keys()) | list %}
+    {% if keeper and flagged %}
+      <div class="group-rows compare-host" id="group-{{ group.key.slug() }}-rows">
+        {% include '_compare_strip.html' with context %}
+      </div>
+    {% else %}
+      <div class="group-rows" id="group-{{ group.key.slug() }}-rows">
+        {% for t in torrents %}
+          {% set reason = (rule_marks | default({})).get(t.hash) %}
+          {% set marked = reason is not none %}
+          {% set factors = (rule_factors | default({})).get(t.hash, ()) %}
+          {% set is_keeper = t.hash == _keeper_hash %}
+          {% include '_torrent.html' with context %}
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="group-rows" id="group-{{ group.key.slug() }}-rows">
+      {% for t in torrents %}
+        {% set reason = (rule_marks | default({})).get(t.hash) %}
+        {% set marked = reason is not none %}
+        {% set factors = (rule_factors | default({})).get(t.hash, ()) %}
+        {% set is_keeper = t.hash == _keeper_hash %}
+        {% include '_torrent.html' with context %}
+      {% endfor %}
+    </div>
+  {% endif %}
 </article>
