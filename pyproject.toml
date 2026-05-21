@@ -1,0 +1,60 @@
+[project]
+name = "qbit-filter"
+version = "0.1.0"
+description = "Local web UI grouping qBittorrent torrents by movie or TV show."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+authors = [{ name = "hritwik" }]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "jinja2>=3.1",
+    "sse-starlette>=2.1",
+    "qbittorrent-api>=2024.7",
+    "guessit>=3.8",
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+qbit-filter = "qbit_filter.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "py-spy>=0.3",
+    "playwright>=1.60.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qbit_filter"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra"
