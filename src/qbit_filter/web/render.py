@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from qbit_filter.arr.models import ArrMatch
 from qbit_filter.cleanup.rules import ReasonFactor
 from qbit_filter.domain import FilterState, Group, GroupKey, Torrent, tier_rank
 from qbit_filter.state.store import Store
@@ -14,6 +15,39 @@ from qbit_filter.state.views import (
     seasons_of,
     torrents_for_group,
 )
+
+
+def _arr_meta_for_group(store: Store, torrents: list[Torrent]) -> ArrMatch | None:
+    """Pick the first ArrMatch found across the group's torrents.
+
+    Groups are guessit-derived; all torrents in a group *should* point at the
+    same arr entity. If they disagree (e.g. mixed Sonarr + Radarr in one
+    group due to ambiguous parsing), the first match wins -- a follow-up
+    rule (identity-based regrouping) splits them properly.
+    """
+    if store.arr is None or not store.arr.hash_to_arr:
+        return None
+    for t in torrents:
+        m = store.arr.hash_to_arr.get(t.hash.lower())
+        if m is not None:
+            return m
+    return None
+
+
+def _arr_matches_for_torrents(
+    store: Store, torrents: list[Torrent]
+) -> dict[str, ArrMatch]:
+    """Per-torrent ArrMatch lookup. Returns ``{hash: match}`` only for matched
+    torrents so the template can render the badge conditionally without a
+    ``None`` check per row."""
+    if store.arr is None or not store.arr.hash_to_arr:
+        return {}
+    out: dict[str, ArrMatch] = {}
+    for t in torrents:
+        m = store.arr.hash_to_arr.get(t.hash.lower())
+        if m is not None:
+            out[t.hash] = m
+    return out
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -46,21 +80,33 @@ def render_group(
     rule_severity: dict[str, str] | None = None,
 ) -> str:
     seasons = seasons_of(group, store) if store is not None else []
+    ordered = _order_torrents_for_display(torrents)
+    arr_meta = _arr_meta_for_group(store, ordered) if store is not None else None
+    arr_matches = (
+        _arr_matches_for_torrents(store, ordered) if store is not None else {}
+    )
     return _templates(request).get_template("_group.html").render(
         request=request,
         group=group,
-        torrents=_order_torrents_for_display(torrents),
+        torrents=ordered,
         seasons=seasons,
         rule_marks=rule_marks or {},
         rule_keeper=rule_keeper,
         rule_factors=rule_factors or {},
         rule_severity=rule_severity or {},
+        arr_meta=arr_meta,
+        arr_matches=arr_matches,
     )
 
 
-def render_torrent(request: Request, torrent: Torrent) -> str:
+def render_torrent(
+    request: Request, torrent: Torrent, *, store: Store | None = None
+) -> str:
+    arr_match: ArrMatch | None = None
+    if store is not None and store.arr is not None:
+        arr_match = store.arr.hash_to_arr.get(torrent.hash.lower())
     return _templates(request).get_template("_torrent.html").render(
-        request=request, torrent=torrent
+        request=request, torrent=torrent, arr_match=arr_match
     )
 
 
@@ -106,18 +152,23 @@ def render_groups_payload(
             rule_keeper = (rule_keepers_by_group or {}).get(group.key, "")
             rule_factors = (rule_factors_by_group or {}).get(group.key, {})
             rule_severity = (rule_severity_by_group or {}).get(group.key, {})
+            ordered = _order_torrents_for_display(
+                torrents_for_group(store, group.key, fs)
+            )
+            arr_meta = _arr_meta_for_group(store, ordered)
+            arr_matches = _arr_matches_for_torrents(store, ordered)
             parts.append(
                 tpl.get_template("_group.html").render(
                     request=request,
                     group=group,
-                    torrents=_order_torrents_for_display(
-                        torrents_for_group(store, group.key, fs)
-                    ),
+                    torrents=ordered,
                     seasons=seasons_of(group, store),
                     rule_marks=rule_marks,
                     rule_keeper=rule_keeper,
                     rule_factors=rule_factors,
                     rule_severity=rule_severity,
+                    arr_meta=arr_meta,
+                    arr_matches=arr_matches,
                 )
             )
     else:
@@ -151,6 +202,10 @@ def render_filter_facets(
     request: Request, store: Store, fs: FilterState
 ) -> str:
     counts = count_by_facet(store)
+    arr_configured = store.arr is not None and store.arr.configured
     return _templates(request).get_template("_filters.html").render(
-        request=request, counts=counts, filter_state=fs
+        request=request,
+        counts=counts,
+        filter_state=fs,
+        store_arr_configured=arr_configured,
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
+from typing import Literal
 
 
 class GroupKind(StrEnum):
@@ -142,6 +143,11 @@ class FilterState:
     # values >=2 restrict the view to groups with multiple torrents (e.g. shows
     # with multiple seasons, or duplicates worth pruning).
     min_torrents: int = 1
+    # *arr-derived filters. "any" = no filter, "monitored"/"unmonitored" check
+    # the matched arr entity's monitored flag, "orphan" = no arr knows about
+    # this torrent. Tri-state for monitored; ``arr_cutoff`` is met/unmet/any.
+    arr_monitored: Literal["any", "monitored", "unmonitored", "orphan"] = "any"
+    arr_cutoff: Literal["any", "met", "unmet"] = "any"
 
     @property
     def is_empty(self) -> bool:
@@ -156,6 +162,8 @@ class FilterState:
             and not self.not_trackers
             and not self.search
             and self.min_torrents <= 1
+            and self.arr_monitored == "any"
+            and self.arr_cutoff == "any"
         )
 
 

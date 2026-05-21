@@ -72,4 +72,40 @@
       </details>
     {% endif %}
   {% endfor %}
+  {% if store_arr_configured | default(false) %}
+    {% set _mon = filter_state.arr_monitored %}
+    {% set _cut = filter_state.arr_cutoff %}
+    <details class="facet" open>
+      <summary>
+        <span class="facet-label">Library (arr)</span>
+        <span class="chevron" aria-hidden="true">v</span>
+      </summary>
+      <div class="facet-chips arr-facets">
+        {% for value, label in [('monitored','Monitored'), ('unmonitored','Unmonitored'), ('orphan','Orphan (no arr)')] %}
+          <button class="chip facet-chip arr-chip"
+                  type="button"
+                  aria-pressed="{{ 'true' if _mon == value else 'false' }}"
+                  data-facet="arr_monitored"
+                  hx-post="/filters"
+                  hx-vals='{"facet": "arr_monitored", "value": "{{ value }}"}'
+                  hx-target="#groups"
+                  hx-swap="innerHTML">
+            <span class="chip-label">{{ label }}</span>
+          </button>
+        {% endfor %}
+        {% for value, label in [('met','Cutoff met'), ('unmet','Upgrade pending')] %}
+          <button class="chip facet-chip arr-chip"
+                  type="button"
+                  aria-pressed="{{ 'true' if _cut == value else 'false' }}"
+                  data-facet="arr_cutoff"
+                  hx-post="/filters"
+                  hx-vals='{"facet": "arr_cutoff", "value": "{{ value }}"}'
+                  hx-target="#groups"
+                  hx-swap="innerHTML">
+            <span class="chip-label">{{ label }}</span>
+          </button>
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
 </div>

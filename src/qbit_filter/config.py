@@ -36,6 +36,24 @@ class Settings(BaseSettings):
     # Set automatically by `nix run .#qbit-dev`; off in prod / docker.
     dev_mode: bool = False
 
+    # Radarr / Sonarr integration. Empty URL disables that source; both being
+    # empty turns the integration into a no-op (background task exits, no
+    # sidebar section, *arr-aware rules surface zero candidates).
+    radarr_url: str = ""
+    radarr_api_key: str = ""
+    sonarr_url: str = ""
+    sonarr_api_key: str = ""
+    # *arr poll cadence. Library state changes far less often than qBit state,
+    # so 60s is comfortable; the matching index also rebuilds on every qBit
+    # store.rid bump so newly-added torrents pick up arr metadata quickly.
+    arr_poll_interval_seconds: float = 60.0
+    # When True (default), fall back to normalised-title+year lookup against
+    # the arr movie/series list for torrents that don't have a tag and aren't
+    # in arr's queue or recent history. Keeps coverage high at the cost of
+    # rare false matches (e.g. "Avatar" 2009 vs "Avatar: The Last Airbender").
+    # Set to False for strict downloadId-only matching.
+    arr_title_fallback: bool = True
+
     @field_validator("movie_categories", "tv_categories", mode="before")
     @classmethod
     def _parse_csv(cls, v: object) -> frozenset[str]:

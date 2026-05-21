@@ -19,6 +19,18 @@
 
 ## Done
 
+- [x] **Radarr / Sonarr integration (Phase 11).** New `arr/` package
+      (client + sync + index + models), `state/arr_store.py`, \*arr
+      polling task in `app.py` lifespan. Match precedence: tag -> queue
+      -> history -> normalised title+year (toggleable). New rules:
+      `arr-cutoff-met-cold`, `arr-unmonitored`. Posters hot-linked from
+      `${arr_url}/api/v3/MediaCover/{id}/poster.jpg?apikey=...`,
+      monitored / cutoff badges in group meta, per-row monitored eye
+      indicator. New filter facets: Monitored / Unmonitored / Orphan
+      and Cutoff met / Upgrade pending. Cache version bumped 4 -> 5.
+      Settings: `RADARR_URL`, `RADARR_API_KEY`, `SONARR_URL`,
+      `SONARR_API_KEY`, `ARR_POLL_INTERVAL_SECONDS`,
+      `ARR_TITLE_FALLBACK`.
 - [x] **Upgrade-detection bulk select.** Phase 10, session 7. Side-by-
       side compare strip (KEEPER vs FLAGGED) + structured factor pills + keeper "K" badge + per-group "Select losers" button + `a` key
       shortcut. Rule is `SupersededQualityRule` in
@@ -61,16 +73,39 @@
 
 - also, the first boot torrent loading progress is not showing. check for errors in those too. QUICKLY
 
+- so now that "superseded quality" filter is working, we need a new filter which is smart enought to check if a movie/show has multiple torrents, and all of them are 4k (or 1080p), then it can select the 1 torrent which can be removed. the condition for it should be: the new torrent was added after old one. both are same quality. (one exception can be if both torrents of movie/show is downloaded within last 10 days, then the one for removal is highlighted in yellow since any freeleech torrents which are not seeded for 10days will add a penalty on your account.)figure out other things yourself. make the filter system extensible so that more such rules can be added easily in future.
+
+- lets start with radarr/sonarr integration. before starting the plan, create another plan where you explore thoroughly how more smart filters and more UI features can be implemented in this application with sonarr/radarr integration data. find out atleast 10 ways. then start implementation. This was your response btw from last session: "arr would unlock different future rules (TMDB/IMDB identity dedup, monitored vs orphan, episode-level granularity). Worth its own phase only when a rule actually needs that precision.". Search on the internet for radarr/sonarr api and for use cases too.
+-
+
 ## Open
 
-- Make these changes quickly. Dont run tests. we will implement first, fix later.
-
-- so now that "superseded quality" filter is working, we need a new filter which is smart enought to check if a movie/show has multiple torrents, and all of them are 4k (or 1080p), then it can select the 1 torrent which can be removed. the condition for it should be: the new torrent was added after old one. both are same quality. (one exception can be if both torrents of movie/show is downloaded within last 10 days, then the one for removal is highlighted in yellow since any freeleech torrents which are not seeded for 10days will add a penalty on your account.)figure out other things yourself. make the filter system extensible so that more such rules can be added easily in future. can radarr/sonarr integration be useful here finally?
-
-- [ ] **Sonarr / Radarr integration.** Prerequisite for posters and
-      future automation.
-- [ ] **Movie / TV posters left of the name** in each row, sourced from
-      Sonarr / Radarr metadata. Cache locally.
+- [ ] **Identity-based regrouping (Phase 11.7).** Merge guessit-split
+      groups when they share a TMDB / TVDB id from arr. e.g. "Dune Part
+      One 2021" + "Dune 2021" -> one group.
+- [ ] **Sonarr-aware season grid (Phase 11.8).** Replace flat season
+      chips with `[S01 OK 10/10][S02 OK 10/10][S03 X 7/10]` from
+      `series.seasons[].statistics`.
+- [ ] **Confirm-dialog enrichment (Phase 11.9).** "Deleting 5 GB
+      across 12 monitored Sonarr episodes. Sonarr will re-search if you
+      proceed." Concrete consequence text from arr_match data.
+- [ ] **Poster proxy endpoint.** Currently posters hot-link to
+      `${radarr_url}/api/v3/MediaCover/.../poster.jpg?apikey=...` so the
+      API key is visible in the browser. Acceptable on LAN; add a
+      `/poster/{src}/{id}` proxy if this ever runs over the open internet.
+- [ ] **More arr rules.** Below-cutoff upgrade-pending anti-rule,
+      orphan rule, identity-based duplicate, ended-series-+-complete,
+      unmonitored season, quality-profile mismatch, stalled grab,
+      size mismatch, removed-from-library. See exploration plan for
+      details (`~/.claude/plans/make-these-sequential-kay.md`).
+- [ ] **arr filter facets (more).** Quality profile, collection,
+      genre, series status (continuing/ended), network, language.
+- [ ] **"Open in Radarr/Sonarr" deep-link** in the kebab menu.
+- [ ] **Search by TMDB / IMDB ID.** Global search accepts `tmdb:155`
+      and `tt0468569` syntax.
+- [ ] **Tag backfill.** Push `radarr:<id>` / `sonarr:<id>` tags to
+      qBit when an ArrMatch is established via queue/history/title.
+      Optional / behind a flag.
 - [ ] **Dynamic filter rules** to bulk-select torrents. UI with
       reusable axes (date added, quality, size, presence-of-higher-
       quality-in-same-group) that compose into one selection rule. The

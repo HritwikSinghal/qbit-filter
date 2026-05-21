@@ -1,5 +1,5 @@
 # Project: qbit-filter
-> Last updated: 2026-05-21 | Session: 7
+> Last updated: 2026-05-21 | Session: 8
 
 ## Current state
 
@@ -172,6 +172,37 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim --
 - [ ] 9.5 Nix build verification + dep shims if needed
 - [ ] 9.6 Final acceptance check (tick spec acceptance criteria)
 
+### Phase 11: Radarr / Sonarr integration (session 8, 2026-05-21)
+- [x] 11.1 `arr/` package: `client.py` (httpx wrappers for /movie,
+      /series, /queue, /history, /qualityprofile), `models.py`
+      (`ArrMovie`, `ArrSeries`, `ArrMatch`, `ArrSnapshot`,
+      `QualityProfile`), `sync.py` (`poll_arr` async generator,
+      concurrent Radarr + Sonarr fetches), `index.py`
+      (`build_index`: tag -> queue -> history -> title fallback).
+      Settings added to `config.py` + `.env.example`. Lifespan in
+      `app.py` spawns `_arr_poller` alongside `_poller`; degrades
+      gracefully when arr URL is empty.
+- [x] 11.2 `state/arr_store.py` (`ArrStore` -- `movies_by_id`,
+      `series_by_id`, `tmdb_to_movie`, `tvdb_to_series`,
+      `hash_to_arr`, `quality_profiles`, ok flags + rid). `Store.arr`
+      pointer added; only the arr poller writes to `ArrStore`.
+- [x] 11.3 Two cleanup rules: `ArrCutoffMetColdRule`
+      (`arr-cutoff-met-cold`), `ArrUnmonitoredCompletedRule`
+      (`arr-unmonitored`). Both no-op when `store.arr is None`.
+      Registered in `cleanup/registry.py` in that order so the more
+      aligned-with-intent rule lands at the top of the rule bar.
+- [x] 11.4 UI: posters in group header (hot-linked from arr with
+      API key in URL), canonical title + year override, R/S badge,
+      monitored / cutoff text indicators, per-row monitored eye.
+      `CACHE_VERSION` bumped 4 -> 5.
+- [x] 11.5 Filter facets: `FilterState.arr_monitored`
+      (any/monitored/unmonitored/orphan), `FilterState.arr_cutoff`
+      (any/met/unmet). `_filters.html` shows the "Library (arr)"
+      section only when arr is configured. `torrent_matches` extended
+      to accept `store` and apply arr filters; all call sites updated.
+- [x] 11.6 Docs: `docs/todo.md` Open/Done updated;
+      `docs/progress.md` entry + decisions note.
+
 ### Phase 10: Rule-cleanup UX (session 7, 2026-05-21)
 - [x] 10.1 Motion tokens (`--motion-fast/base/slow/-undo-window`,
       `--ease-out/in/standard`) in `tokens.css`; reduced-motion override.
@@ -209,6 +240,7 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim --
 | Phase 8: Actions | Done | 2/2 |
 | Phase 9: Polish + Nix packaging | In progress | 2/7 |
 | Phase 10: Rule-cleanup UX | Done | 8/8 |
+| Phase 11: Radarr / Sonarr integration | Done | 6/6 |
 
 ## Significant changes
 
@@ -417,6 +449,39 @@ diff-update from SSE" (no full replace).
 
 ## Decisions & Notes
 <!-- Append entries as: YYYY-MM-DD: [decision or important note] -->
+- 2026-05-21 (session 8): `ArrStore` is a *separate* store from the
+  qBit `Store`, owned by the arr poller task. Rationale: qBit reconciler
+  rebuilds `Torrent` snapshots whole on every 1 s tick; the arr poller
+  runs every 60 s. Bolting arr fields onto `Torrent` would race the
+  reconciler. `Store.arr: ArrStore | None` is a one-way pointer set
+  during lifespan setup; rules / views / templates reach through it,
+  never write to it.
+- 2026-05-21 (session 8): Match precedence for hash -> ArrMatch is
+  tag -> Radarr queue -> Sonarr queue -> Radarr history -> Sonarr
+  history -> title+year fallback. The first three are deterministic
+  (arr's downloadId is the qBit infohash); history covers torrents
+  whose queue entries have rotated. Title fallback is gated by
+  `ARR_TITLE_FALLBACK=true` (default). Set to false for strict
+  downloadId-only matching when title collisions bite (e.g. "Avatar"
+  the movie vs the series).
+- 2026-05-21 (session 8): Poster URLs are hot-linked from the arr
+  instance with the API key in the query string. Acceptable on LAN.
+  Follow-up: `/poster/{src}/{id}` proxy that strips the key server-side.
+- 2026-05-21 (session 8): Sonarr lacks a per-series cutoff-met flag.
+  `_series_match` in `arr/index.py` uses the heuristic
+  `episode_file_count >= total_episode_count` as a proxy. When per-
+  episode matching lands (out-of-scope for v1), this can become an
+  honest per-series-cutoff signal.
+- 2026-05-21 (session 8): Both pollers can publish RESYNC. SSE handler
+  already de-dupes via `last_resync_at` (RESYNC_COALESCE_INTERVAL = 1.0s),
+  so two pollers firing back-to-back collapse into one re-render.
+- 2026-05-21 (session 8): `torrent_matches(t, fs, store=None)` -- the
+  `store` arg was added so arr-derived facets can run. When the caller
+  doesn't have a store handy (unit-test path), the function falls back
+  to qBit-only behaviour and treats any active arr facet as "no match"
+  so the UI doesn't leak rows from a configured-but-loading arr store.
+
+
 - 2026-05-21 (session 6): `selection` is now `Map<hash, bytes>`, not
   `Set<hash>`. Bytes captured at check-time from the row's
   `data-bytes` attribute. Reason: footer total summed bytes by doing

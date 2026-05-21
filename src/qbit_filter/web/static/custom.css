@@ -1146,3 +1146,96 @@ kbd {
   to   { opacity: 1; }
 }
 .compare-strip { animation: qf-fade-in var(--motion-base) var(--ease-out) both; }
+
+/* ------------------------------------------------------------------------- *
+ * Radarr / Sonarr enrichment (Phase 11).
+ *
+ * Poster: 56x84 thumbnail floated left of the title in the group meta panel.
+ * Badges: source initial (R/S), monitored / unmonitored, cutoff met/unmet.
+ * Row-level: subtle left-border accent on torrent rows whose arr entity is
+ * unmonitored, so they read as "candidates" without overwhelming the existing
+ * tier-color stripe.
+ * ------------------------------------------------------------------------- */
+
+.group-poster {
+  width: 56px;
+  height: 84px;
+  border-radius: 4px;
+  object-fit: cover;
+  float: left;
+  margin: 0 10px 4px 0;
+  background: var(--surface-container, #1a1a1f);
+  /* Faded placeholder until the lazy image loads. */
+  box-shadow: 0 0 0 1px var(--border-subtle, rgba(255,255,255,0.08));
+}
+
+.group-meta .arr-badge {
+  display: inline-block;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.7rem;
+  font-weight: 700;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
+  background: var(--accent-muted, #2a2a35);
+  color: var(--accent, #b4b8d3);
+}
+.group-meta .arr-badge.arr-badge-radarr { background: rgba(247, 174, 67, 0.18); color: #f7ae43; }
+.group-meta .arr-badge.arr-badge-sonarr { background: rgba(94, 156, 211, 0.18); color: #5e9cd3; }
+
+.group-meta .arr-monitored,
+.group-meta .arr-cutoff {
+  display: inline-block;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
+  background: var(--surface-container, #1a1a1f);
+  color: var(--text-muted, #888);
+}
+.group-meta .arr-monitored.on { color: #6bcf7f; background: rgba(107, 207, 127, 0.12); }
+.group-meta .arr-monitored.off { color: #d97a6c; background: rgba(217, 122, 108, 0.12); }
+.group-meta .arr-cutoff.met { color: #6bcf7f; background: rgba(107, 207, 127, 0.12); }
+.group-meta .arr-cutoff.unmet { color: #f7c543; background: rgba(247, 197, 67, 0.12); }
+
+/* Row-level monitored indicator: tiny "o" / "-" before the name. */
+.arr-eye {
+  display: inline-block;
+  width: 12px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-align: center;
+  margin-right: 4px;
+}
+.arr-eye.on { color: #6bcf7f; }
+.arr-eye.off { color: #888; }
+
+/* Faint stripe on the right edge for unmonitored rows -- complementary to the
+   tier-color stripe on the left. Visible without screaming. */
+.torrent-row.arr-unmonitored {
+  box-shadow: inset -2px 0 0 0 rgba(217, 122, 108, 0.4);
+}
+
+/* Library facet section in the sidebar -- single column of toggles. */
+.arr-facets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.arr-facets .arr-chip {
+  justify-content: flex-start;
+  text-align: left;
+}
+.arr-facets .arr-chip[aria-pressed='true'] {
+  background: var(--accent-soft, rgba(94, 106, 210, 0.18));
+  border-color: var(--accent, #5e6ad2);
+  color: var(--text-strong, #e5e5ea);
+}

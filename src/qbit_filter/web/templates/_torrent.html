@@ -2,6 +2,8 @@
    Variables: t (Torrent), marked (bool, optional), reason (str, optional),
                factors (tuple[ReasonFactor], optional), is_keeper (bool, optional),
                severity (str, optional) -- "warning" tints the whole row yellow.
+               arr_match (ArrMatch | None, optional) -- arr enrichment for this row.
+               arr_matches (dict[str, ArrMatch], optional) -- alt lookup table.
    Supports legacy `torrent` variable used by render_torrent() (SSE updates). #}
 {% set t = t if t is defined else torrent %}
 {% set _tier = t.quality.tier.value %}
@@ -9,14 +11,16 @@
 {% set _factors = factors | default(()) %}
 {% set _is_keeper = is_keeper | default(false) %}
 {% set _severity = severity | default('') %}
+{% set _arr_match = arr_match if arr_match is defined and arr_match else (arr_matches.get(t.hash) if arr_matches is defined and arr_matches else None) %}
 <div id="torrent-{{ t.hash }}"
-     class="torrent-row {{ _tier_class }}{% if _is_keeper %} is-keeper{% endif %}"
+     class="torrent-row {{ _tier_class }}{% if _is_keeper %} is-keeper{% endif %}{% if _arr_match %} has-arr{% if _arr_match.monitored %} arr-monitored{% else %} arr-unmonitored{% endif %}{% endif %}"
      data-hash="{{ t.hash }}"
      data-state="{{ t.state.value }}"
      data-tier="{{ _tier }}"
      data-marked="{{ 'true' if marked|default(false) else 'false' }}"
      {% if _is_keeper %}data-keeper="true"{% endif %}
      {% if _severity %}data-severity="{{ _severity }}"{% endif %}
+     {% if _arr_match %}data-arr-source="{{ _arr_match.source }}" data-arr-monitored="{{ 'true' if _arr_match.monitored else 'false' }}" data-arr-cutoff="{{ 'met' if _arr_match.quality_cutoff_met else 'unmet' }}"{% endif %}
      {% if marked|default(false) %}title="{{ reason or '' }}"{% endif %}>
   <input type="checkbox"
          class="row-check"
@@ -28,6 +32,7 @@
   </span>
   <span class="name" title="{{ t.name }}">
     {% if _is_keeper %}<span class="keeper-badge" title="Rule's recommended keeper">K</span>{% endif %}
+    {% if _arr_match %}<span class="arr-eye {{ 'on' if _arr_match.monitored else 'off' }}" title="{{ _arr_match.source | capitalize }} {{ 'monitored' if _arr_match.monitored else 'unmonitored' }} ({{ _arr_match.via }})">{% if _arr_match.monitored %}o{% else %}-{% endif %}</span>{% endif %}
     {{ t.name }}
   </span>
   <span class="meta">

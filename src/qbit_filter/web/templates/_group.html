@@ -7,13 +7,45 @@
      rule_keeper     str             -- keeper hash (Bundle 1); optional
      rule_factors    dict[str, tuple[ReasonFactor, ...]]; optional
      rule_severity   dict[str, str]  -- {torrent_hash: "warning"}; optional
+     arr_meta        ArrMatch | None -- arr-derived metadata for the group; optional
+     arr_matches     dict[str, ArrMatch] -- per-torrent arr matches; optional
 #}
-<article id="group-{{ group.key.slug() }}" class="group-card">
+{% set _arr = arr_meta if arr_meta is defined else None %}
+{% set _arr_matches = arr_matches if arr_matches is defined else {} %}
+{% set _title = (_arr.title if _arr and _arr.title else group.title) %}
+{% set _year = (_arr.year if _arr and _arr.year else group.year) %}
+{% set _arr_link = '' %}
+{% if _arr %}
+  {% if _arr.source == 'radarr' and _arr.title_slug %}{% set _arr_link = '/movie/' + _arr.title_slug %}{% endif %}
+  {% if _arr.source == 'sonarr' and _arr.title_slug %}{% set _arr_link = '/series/' + _arr.title_slug %}{% endif %}
+{% endif %}
+<article id="group-{{ group.key.slug() }}" class="group-card{% if _arr %} has-arr arr-{{ _arr.source }}{% endif %}"
+  {% if _arr %}data-arr-source="{{ _arr.source }}" data-arr-id="{{ _arr.entity_id }}"{% endif %}>
   <div class="group-meta">
-    <h2 class="title">{{ group.title }}</h2>
+    {% if _arr and _arr.poster_url %}
+      <img class="group-poster"
+           src="{{ _arr.poster_url }}"
+           loading="lazy" decoding="async"
+           width="56" height="84"
+           alt="">
+    {% endif %}
+    <h2 class="title">{{ _title }}</h2>
     <div class="sub">
-      {% if group.year %}{{ group.year }} {% endif %}
+      {% if _year %}{{ _year }} {% endif %}
       {{ group.kind.value }}
+      {% if _arr %}
+        <span class="arr-badge arr-badge-{{ _arr.source }}" title="Tracked by {{ _arr.source | capitalize }} ({{ _arr.via }})">{{ _arr.source[0] | upper }}</span>
+        {% if _arr.monitored %}
+          <span class="arr-monitored on" title="Monitored in {{ _arr.source }}">monitored</span>
+        {% else %}
+          <span class="arr-monitored off" title="Unmonitored in {{ _arr.source }}">unmonitored</span>
+        {% endif %}
+        {% if _arr.quality_cutoff_met %}
+          <span class="arr-cutoff met" title="Quality cutoff met">cutoff [OK]</span>
+        {% else %}
+          <span class="arr-cutoff unmet" title="Upgrade pending">upgrade pending</span>
+        {% endif %}
+      {% endif %}
       {% if torrents %}
         <span id="group-{{ group.key.slug() }}-count">{{ torrents | length }} item{{ '' if torrents | length == 1 else 's' }}</span>
       {% endif %}

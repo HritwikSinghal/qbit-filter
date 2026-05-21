@@ -7,6 +7,8 @@ from __future__ import annotations
 import logging
 
 from qbit_filter.cleanup.rules import (
+    ArrCutoffMetColdRule,
+    ArrUnmonitoredCompletedRule,
     CrossSeedDuplicateRule,
     DeadTrackerRule,
     DuplicateSameQualityRule,
@@ -25,6 +27,8 @@ RULES: tuple[Rule, ...] = (
     DuplicateSameQualityRule(),
     StalledAndOldRule(),
     RatioMetAndColdRule(),
+    ArrCutoffMetColdRule(),
+    ArrUnmonitoredCompletedRule(),
     DeadTrackerRule(),
     CrossSeedDuplicateRule(),
     OrphanedOnDiskRule(),
@@ -45,7 +49,7 @@ def _probe(rule: Rule) -> bool:
         rule.candidates(Store())
     except NotImplementedError:
         return False
-    except Exception:  # noqa: BLE001 -- rules are user-extension points
+    except Exception:  # rules are user-extension points
         logger.exception("rule %s raised during is_implemented probe", rule.slug)
         return False
     return True

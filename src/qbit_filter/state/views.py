@@ -10,10 +10,16 @@ from qbit_filter.grouping.parser import quick_season
 from qbit_filter.state.store import Store
 
 
-def torrent_matches(t: Torrent, fs: FilterState) -> bool:
+def torrent_matches(t: Torrent, fs: FilterState, store: Store | None = None) -> bool:
     """Per-torrent filter check. Used by cleanup-rule candidate filtering so
     the rule view honours the user's active filter chips at the torrent
-    level, not just the group level."""
+    level, not just the group level.
+
+    When ``store`` is supplied and *arr-derived facets are active, also
+    intersects against ``store.arr.hash_to_arr`` so monitored/orphan/cutoff
+    filters work. Callers that don't have a store handy (e.g. unit tests of
+    the qBit-only path) can omit it; the arr filter then no-ops.
+    """
     # Negative filters first: any match here excludes the torrent.
     if fs.not_statuses and t.state in fs.not_statuses:
         return False
@@ -30,7 +36,30 @@ def torrent_matches(t: Torrent, fs: FilterState) -> bool:
         return False
     if fs.tags and not (fs.tags & set(t.tags)):
         return False
-    return not (fs.trackers and not (fs.trackers & set(t.trackers)))
+    if fs.trackers and not (fs.trackers & set(t.trackers)):
+        return False
+    # *arr-derived filters: skip cleanly when arr store isn't available.
+    if fs.arr_monitored != "any" or fs.arr_cutoff != "any":
+        if store is None or store.arr is None:
+            # arr filter active but no data -> treat as no-match so the UI
+            # doesn't show stale rows when arr is configured-but-loading.
+            return False
+        match = store.arr.hash_to_arr.get(t.hash.lower())
+        if fs.arr_monitored == "monitored" and (match is None or not match.monitored):
+            return False
+        if fs.arr_monitored == "unmonitored" and (match is None or match.monitored):
+            return False
+        if fs.arr_monitored == "orphan" and match is not None:
+            return False
+        if fs.arr_cutoff == "met" and (
+            match is None or not match.quality_cutoff_met
+        ):
+            return False
+        if fs.arr_cutoff == "unmet" and (
+            match is None or match.quality_cutoff_met
+        ):
+            return False
+    return True
 
 
 def _group_passes(group: Group, store: Store, fs: FilterState) -> bool:
@@ -44,6 +73,7 @@ def _group_passes(group: Group, store: Store, fs: FilterState) -> bool:
         fs.statuses or fs.categories or fs.tags or fs.trackers
         or fs.not_statuses or fs.not_categories
         or fs.not_tags or fs.not_trackers
+        or fs.arr_monitored != "any" or fs.arr_cutoff != "any"
     )
     required = max(1, fs.min_torrents)
     if not has_facet:
@@ -55,7 +85,7 @@ def _group_passes(group: Group, store: Store, fs: FilterState) -> bool:
     matching = 0
     for h in group.torrent_hashes:
         t = store.torrents.get(h)
-        if t is not None and torrent_matches(t, fs):
+        if t is not None and torrent_matches(t, fs, store):
             matching += 1
             if matching >= required:
                 return True
@@ -90,13 +120,14 @@ def torrents_for_group(
         fs.statuses or fs.categories or fs.tags or fs.trackers
         or fs.not_statuses or fs.not_categories
         or fs.not_tags or fs.not_trackers
+        or fs.arr_monitored != "any" or fs.arr_cutoff != "any"
     )
     if not has_facet:
         return [store.torrents[h] for h in group.torrent_hashes if h in store.torrents]
     out: list[Torrent] = []
     for h in group.torrent_hashes:
         t = store.torrents.get(h)
-        if t is not None and torrent_matches(t, fs):
+        if t is not None and torrent_matches(t, fs, store):
             out.append(t)
     return out
 

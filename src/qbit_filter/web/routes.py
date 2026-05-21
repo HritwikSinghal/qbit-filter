@@ -41,7 +41,7 @@ CACHE_COOKIE = "qf_has_cache"
 # (e.g. new field on every row, new wrapping element, renamed selector).
 # Exposed to the client as ``window.QF_CACHE_VERSION`` so cached HTML from
 # a previous version is discarded on next page load.
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 SSE_PING_INTERVAL = 15.0  # seconds between keep-alive comments
 # Minimum gap between RESYNC payloads to one client. Each RESYNC re-renders
 # every visible group (~900KB blob), so back-to-back RESYNCs visibly stutter
@@ -142,7 +142,7 @@ def _render_rule_bar(request: Request, store: Store, fs: FilterState) -> str:
                     continue
                 if not group_matches(store, fs, c.group_key):
                     continue
-                if not torrent_matches(t, fs):
+                if not torrent_matches(t, fs, store):
                     continue
                 count += 1
         rows.append(
@@ -188,6 +188,7 @@ def register_routes(app: FastAPI) -> None:
         # incrementally, so flushing the head + app-bar + sidebar first
         # gives the user a usable shell within tens of milliseconds while
         # the (CPU-bound) group rendering catches up in the thread pool.
+        arr_configured = store.arr is not None and store.arr.configured
         chrome = templates.get_template("index.html").render(
             request=request,
             filter_state=sub.filter_state,
@@ -205,6 +206,7 @@ def register_routes(app: FastAPI) -> None:
             cache_version=CACHE_VERSION,
             cache_mode=cache_mode,
             stream_mode=True,
+            store_arr_configured=arr_configured,
         )
         before, after = chrome.split(_STREAM_MARKER, 1)
 
@@ -214,11 +216,23 @@ def register_routes(app: FastAPI) -> None:
         fs = sub.filter_state
 
         def _render_group(group: Group) -> str:
+            torrents = torrents_for_group(store, group.key, fs)
+            arr_meta = None
+            arr_matches: dict[str, Any] = {}
+            if store.arr is not None and store.arr.hash_to_arr:
+                for t in torrents:
+                    m = store.arr.hash_to_arr.get(t.hash.lower())
+                    if m is not None:
+                        arr_matches[t.hash] = m
+                        if arr_meta is None:
+                            arr_meta = m
             return group_tpl.render(
                 request=request,
                 group=group,
-                torrents=torrents_for_group(store, group.key, fs),
+                torrents=torrents,
                 seasons=seasons_of(group, store),
+                arr_meta=arr_meta,
+                arr_matches=arr_matches,
             )
 
         async def body() -> AsyncIterator[bytes]:
@@ -568,7 +582,7 @@ def register_routes(app: FastAPI) -> None:
             # on ``radarr`` must not surface ``sonarr`` candidates even when
             # their group happens to pass (e.g. mixed-content group). Without
             # this, bulk-confirm would queue hashes the user cannot see.
-            if t is None or not torrent_matches(t, fs):
+            if t is None or not torrent_matches(t, fs, store):
                 continue
             by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.reason
             factors_by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.factors
@@ -940,7 +954,7 @@ def _render_delta_events(
         t = store.torrents.get(h)
         if t is None:
             continue
-        if not torrent_matches(t, fs):
+        if not torrent_matches(t, fs, store):
             # Was visible (or might have been); the change (category/tag/etc.)
             # makes it fail the filter now. Remove from DOM -- delete OOB is a
             # no-op if the row was already hidden.
@@ -949,7 +963,7 @@ def _render_delta_events(
             )
             parts.append(_count_oob(gk))
             continue
-        row = render.render_torrent(request, t)
+        row = render.render_torrent(request, t, store=store)
         parts.append(row.replace(
             f'id="torrent-{t.hash}"',
             f'id="torrent-{t.hash}" hx-swap-oob="outerHTML"',
@@ -962,13 +976,13 @@ def _render_delta_events(
         t = store.torrents.get(h)
         if t is None:
             continue
-        if not torrent_matches(t, fs):
+        if not torrent_matches(t, fs, store):
             # New torrent in a visible group, but the user's filter excludes
             # it -- e.g. a cross-seed copy showing up while ``not_tags`` has
             # ``cross-seed``. Don't render the row.
             continue
         slug = gk.slug()
-        row = render.render_torrent(request, t)
+        row = render.render_torrent(request, t, store=store)
         # qf-enter triggers the entrance animation on the new row only;
         # TORRENT_CHANGED rows above skip this so progress ticks don't
         # re-fire the animation on every update.

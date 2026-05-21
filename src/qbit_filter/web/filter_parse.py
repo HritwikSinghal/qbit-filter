@@ -9,13 +9,20 @@ from qbit_filter.domain import FilterState, TorrentStatus
 Facet = Literal[
     "status", "category", "tag", "tracker", "search", "min_torrents",
     "not_status", "not_category", "not_tag", "not_tracker",
+    "arr_monitored", "arr_cutoff",
 ]
 _FACETS: frozenset[str] = frozenset(
     {
         "status", "category", "tag", "tracker", "search", "min_torrents",
         "not_status", "not_category", "not_tag", "not_tracker",
+        "arr_monitored", "arr_cutoff",
     }
 )
+
+_ARR_MONITORED_VALUES: frozenset[str] = frozenset(
+    {"any", "monitored", "unmonitored", "orphan"}
+)
+_ARR_CUTOFF_VALUES: frozenset[str] = frozenset({"any", "met", "unmet"})
 
 
 def is_facet(value: str) -> bool:
@@ -107,6 +114,19 @@ def toggle(fs: FilterState, facet: str, value: str) -> FilterState:
         new_min = 1 if (requested <= 1 or requested == fs.min_torrents) else requested
         return _replace(fs, min_torrents=new_min)
 
+    if facet == "arr_monitored":
+        if value not in _ARR_MONITORED_VALUES:
+            return fs
+        # Tri-state: clicking the active value clears it back to "any".
+        new_value = "any" if value == fs.arr_monitored else value
+        return _replace(fs, arr_monitored=new_value)
+
+    if facet == "arr_cutoff":
+        if value not in _ARR_CUTOFF_VALUES:
+            return fs
+        new_value = "any" if value == fs.arr_cutoff else value
+        return _replace(fs, arr_cutoff=new_value)
+
     return fs
 
 
@@ -128,6 +148,10 @@ def active_count(fs: FilterState) -> int:
         n += 1
     if fs.min_torrents > 1:
         n += 1
+    if fs.arr_monitored != "any":
+        n += 1
+    if fs.arr_cutoff != "any":
+        n += 1
     return n
 
 
@@ -144,6 +168,8 @@ def _replace(
     not_trackers: frozenset[str] | None = None,
     search: str | None = None,
     min_torrents: int | None = None,
+    arr_monitored: str | None = None,
+    arr_cutoff: str | None = None,
 ) -> FilterState:
     return FilterState(
         statuses=fs.statuses if statuses is None else statuses,
@@ -156,4 +182,6 @@ def _replace(
         not_trackers=fs.not_trackers if not_trackers is None else not_trackers,
         search=fs.search if search is None else search,
         min_torrents=fs.min_torrents if min_torrents is None else min_torrents,
+        arr_monitored=fs.arr_monitored if arr_monitored is None else arr_monitored,  # type: ignore[arg-type]
+        arr_cutoff=fs.arr_cutoff if arr_cutoff is None else arr_cutoff,  # type: ignore[arg-type]
     )

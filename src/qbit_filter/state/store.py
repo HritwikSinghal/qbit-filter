@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from qbit_filter.domain import Group, GroupKey, Torrent
+
+if TYPE_CHECKING:
+    from qbit_filter.state.arr_store import ArrStore
 
 
 @dataclass(slots=True)
@@ -21,6 +24,10 @@ class Store:
     # Lives on the Store so the cache doesn't outlive its store (avoids the
     # ``id()``-reuse hazard a module-level dict would have).
     facet_cache: tuple[int, dict[str, Any]] | None = None
+    # Pointer to the *arr enrichment store. Owned by the *arr poller task
+    # in ``app.py``; this is a read-only handle from the qBit store's POV.
+    # None when no *arr instance is configured.
+    arr: ArrStore | None = None
 
     def snapshot_groups(self) -> list[Group]:
         return list(self.groups.values())
