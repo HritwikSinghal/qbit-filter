@@ -12,11 +12,14 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from qbit_filter.domain import (
+    Group,
     GroupKey,
+    GroupKind,
     QualityTier,
     Torrent,
     tier_rank,
 )
+from qbit_filter.grouping.parser import quick_season
 from qbit_filter.state.store import Store
 
 FactorKind = Literal["bad", "good", "neutral", "warning"]
@@ -86,6 +89,30 @@ def _age_days(ts: int, now: int | None) -> int:
     return max(0, (base - ts) // 86_400)
 
 
+def _partition_by_season(group: Group, store: Store) -> list[list[Torrent]]:
+    """Partition a group's torrents into per-season buckets for TV groups.
+
+    TV shows can hold multiple seasons under one group; running a "best tier
+    in the group" comparison across seasons wrongly flags e.g. an S02 1080p
+    when an unrelated S01 2160p sits alongside. For TV groups we bucket by
+    :func:`quick_season` (cheap regex), keeping torrents with no detectable
+    season -- typically full-series packs -- in their own bucket so they
+    only compare against other no-season torrents.
+
+    Movie and OTHER groups return a single all-in bucket; season scoping is
+    meaningless there.
+    """
+    torrents = [
+        store.torrents[h] for h in group.torrent_hashes if h in store.torrents
+    ]
+    if group.kind is not GroupKind.TV:
+        return [torrents]
+    buckets: dict[int | None, list[Torrent]] = {}
+    for t in torrents:
+        buckets.setdefault(quick_season(t.name), []).append(t)
+    return list(buckets.values())
+
+
 @dataclass(frozen=True, slots=True)
 class SupersededQualityRule:
     """Within one group, if a torrent has a strictly higher-tier sibling AND
@@ -108,58 +135,57 @@ class SupersededQualityRule:
 
         out: list[Candidate] = []
         for key, group in store.groups.items():
-            torrents = [
-                store.torrents[h]
-                for h in group.torrent_hashes
-                if h in store.torrents
-                and store.torrents[h].quality.tier is not QualityTier.UNKNOWN
-            ]
-            if len(torrents) < 2:
-                continue
-            best_rank = max(tier_rank(t.quality.tier) for t in torrents)
-            top_siblings = [
-                t for t in torrents if tier_rank(t.quality.tier) == best_rank
-            ]
-            # Compare lower-tier copies to the EARLIEST-added top-tier sibling,
-            # so a later-added second 1080p is still flagged when an older
-            # 2160p sits next to it. Using max() tiebreaks on added_on lets
-            # the "best" pointer drift between same-tier copies and silently
-            # filters genuine supersedes.
-            keeper = min(top_siblings, key=lambda t: t.added_on)
-            for t in torrents:
-                if tier_rank(t.quality.tier) >= best_rank:
-                    continue
-                if t.added_on >= keeper.added_on:
-                    # Lower-tier copy added AFTER the top-tier one is here.
-                    # Treat as intentional (mobile / smaller / language) and
-                    # don't second-guess.
-                    continue
-                factors: list[ReasonFactor] = [
-                    ReasonFactor(
-                        "tier",
-                        f"{t.quality.tier.value} → {keeper.quality.tier.value}",
-                        "bad",
-                    ),
-                    F.added_gap_factor(t.added_on, keeper.added_on),
+            for bucket in _partition_by_season(group, store):
+                torrents = [
+                    t for t in bucket
+                    if t.quality.tier is not QualityTier.UNKNOWN
                 ]
-                size_factor = F.size_delta_factor(t.size, keeper.size)
-                if size_factor is not None:
-                    factors.append(size_factor)
-                ratio_factor = F.ratio_redeemer_factor(t, keeper)
-                if ratio_factor is not None:
-                    factors.append(ratio_factor)
-                out.append(
-                    Candidate(
-                        torrent_hash=t.hash,
-                        group_key=key,
-                        reason=(
-                            f"superseded by {keeper.quality.tier.value} "
-                            f"(added {_age_days(keeper.added_on, now)}d later)"
+                if len(torrents) < 2:
+                    continue
+                best_rank = max(tier_rank(t.quality.tier) for t in torrents)
+                top_siblings = [
+                    t for t in torrents if tier_rank(t.quality.tier) == best_rank
+                ]
+                # Compare lower-tier copies to the EARLIEST-added top-tier sibling,
+                # so a later-added second 1080p is still flagged when an older
+                # 2160p sits next to it. Using max() tiebreaks on added_on lets
+                # the "best" pointer drift between same-tier copies and silently
+                # filters genuine supersedes.
+                keeper = min(top_siblings, key=lambda t: t.added_on)
+                for t in torrents:
+                    if tier_rank(t.quality.tier) >= best_rank:
+                        continue
+                    if t.added_on >= keeper.added_on:
+                        # Lower-tier copy added AFTER the top-tier one is here.
+                        # Treat as intentional (mobile / smaller / language) and
+                        # don't second-guess.
+                        continue
+                    factors: list[ReasonFactor] = [
+                        ReasonFactor(
+                            "tier",
+                            f"{t.quality.tier.value} → {keeper.quality.tier.value}",
+                            "bad",
                         ),
-                        keeper_hash=keeper.hash,
-                        factors=tuple(factors),
+                        F.added_gap_factor(t.added_on, keeper.added_on),
+                    ]
+                    size_factor = F.size_delta_factor(t.size, keeper.size)
+                    if size_factor is not None:
+                        factors.append(size_factor)
+                    ratio_factor = F.ratio_redeemer_factor(t, keeper)
+                    if ratio_factor is not None:
+                        factors.append(ratio_factor)
+                    out.append(
+                        Candidate(
+                            torrent_hash=t.hash,
+                            group_key=key,
+                            reason=(
+                                f"superseded by {keeper.quality.tier.value} "
+                                f"(added {_age_days(keeper.added_on, now)}d later)"
+                            ),
+                            keeper_hash=keeper.hash,
+                            factors=tuple(factors),
+                        )
                     )
-                )
         return out
 
 
@@ -207,68 +233,67 @@ class DuplicateSameQualityRule:
         fl_cutoff = base - self.freeleech_window_days * 86_400
         out: list[Candidate] = []
         for key, group in store.groups.items():
-            torrents = [
-                store.torrents[h]
-                for h in group.torrent_hashes
-                if h in store.torrents
-                and store.torrents[h].quality.tier is not QualityTier.UNKNOWN
-            ]
-            if len(torrents) < 2:
-                continue
-            # Bucket by tier value (string), not by full Quality, so a 1080p
-            # WEB-DL and a 1080p BluRay land in the same bucket and we can
-            # surface the source mismatch as a factor pill on the flagged
-            # row rather than silently skipping the comparison.
-            by_tier: dict[QualityTier, list[Torrent]] = {}
-            for t in torrents:
-                by_tier.setdefault(t.quality.tier, []).append(t)
-            for tier, bucket in by_tier.items():
-                if len(bucket) < 2:
+            for season_bucket in _partition_by_season(group, store):
+                torrents = [
+                    t for t in season_bucket
+                    if t.quality.tier is not QualityTier.UNKNOWN
+                ]
+                if len(torrents) < 2:
                     continue
-                bucket.sort(key=lambda t: t.added_on)
-                keeper = bucket[0]
-                for t in bucket[1:]:
-                    factors: list[ReasonFactor] = [
-                        ReasonFactor("tier", tier.value, "neutral"),
-                        F.added_gap_factor(t.added_on, keeper.added_on),
-                    ]
-                    factors.extend(F.source_codec_factors(t, keeper))
-                    size_factor = F.size_delta_factor(t.size, keeper.size)
-                    if size_factor is not None:
-                        factors.append(size_factor)
-                    ratio_factor = F.ratio_redeemer_factor(t, keeper)
-                    if ratio_factor is not None:
-                        factors.append(ratio_factor)
-                    in_window = (
-                        keeper.added_on >= fl_cutoff
-                        and t.added_on >= fl_cutoff
-                    )
-                    severity: Severity = "normal"
-                    if in_window:
-                        factors.append(
-                            ReasonFactor(
-                                "freeleech",
-                                f"both <={self.freeleech_window_days}d",
-                                "warning",
+                # Bucket by tier value (string), not by full Quality, so a 1080p
+                # WEB-DL and a 1080p BluRay land in the same bucket and we can
+                # surface the source mismatch as a factor pill on the flagged
+                # row rather than silently skipping the comparison.
+                by_tier: dict[QualityTier, list[Torrent]] = {}
+                for t in torrents:
+                    by_tier.setdefault(t.quality.tier, []).append(t)
+                for tier, bucket in by_tier.items():
+                    if len(bucket) < 2:
+                        continue
+                    bucket.sort(key=lambda t: t.added_on)
+                    keeper = bucket[0]
+                    for t in bucket[1:]:
+                        factors: list[ReasonFactor] = [
+                            ReasonFactor("tier", tier.value, "neutral"),
+                            F.added_gap_factor(t.added_on, keeper.added_on),
+                        ]
+                        factors.extend(F.source_codec_factors(t, keeper))
+                        size_factor = F.size_delta_factor(t.size, keeper.size)
+                        if size_factor is not None:
+                            factors.append(size_factor)
+                        ratio_factor = F.ratio_redeemer_factor(t, keeper)
+                        if ratio_factor is not None:
+                            factors.append(ratio_factor)
+                        in_window = (
+                            keeper.added_on >= fl_cutoff
+                            and t.added_on >= fl_cutoff
+                        )
+                        severity: Severity = "normal"
+                        if in_window:
+                            factors.append(
+                                ReasonFactor(
+                                    "freeleech",
+                                    f"both <={self.freeleech_window_days}d",
+                                    "warning",
+                                )
+                            )
+                            severity = "warning"
+                        gap_days = max(
+                            0, (t.added_on - keeper.added_on) // 86_400
+                        )
+                        out.append(
+                            Candidate(
+                                torrent_hash=t.hash,
+                                group_key=key,
+                                reason=(
+                                    f"duplicate {tier.value} "
+                                    f"(added {gap_days}d after keeper)"
+                                ),
+                                keeper_hash=keeper.hash,
+                                factors=tuple(factors),
+                                severity=severity,
                             )
                         )
-                        severity = "warning"
-                    gap_days = max(
-                        0, (t.added_on - keeper.added_on) // 86_400
-                    )
-                    out.append(
-                        Candidate(
-                            torrent_hash=t.hash,
-                            group_key=key,
-                            reason=(
-                                f"duplicate {tier.value} "
-                                f"(added {gap_days}d after keeper)"
-                            ),
-                            keeper_hash=keeper.hash,
-                            factors=tuple(factors),
-                            severity=severity,
-                        )
-                    )
         return out
 
 
