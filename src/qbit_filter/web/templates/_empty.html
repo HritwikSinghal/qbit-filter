@@ -1,0 +1,24 @@
+<div id="empty-state" class="empty-state">
+  {% if filter_state and not filter_state.is_empty %}
+    <h6>No groups match the current filters</h6>
+    <p>
+      Loosen a chip in the sidebar, clear the search, or reset everything.
+    </p>
+    <button class="btn"
+            hx-post="/filters/clear"
+            hx-target="#groups"
+            hx-swap="innerHTML">
+      Clear all filters
+    </button>
+  {% else %}
+    {# When ``total_torrents`` is 0 the streaming response skips this template
+       entirely and lets the first-load overlay handle UX -- so the only way
+       we reach this branch is when the store has torrents but none survived
+       grouping (e.g. all in unmapped categories). #}
+    <h6>No groups to show</h6>
+    <p>
+      qBit reported {{ total_torrents | default(0) }} torrent(s), but none
+      were grouped. Check category mappings in <code>.env</code>.
+    </p>
+  {% endif %}
+</div>

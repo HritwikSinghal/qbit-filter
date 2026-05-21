@@ -1,0 +1,61 @@
+<div class="active-filters-strip">
+  <span class="result-count">
+    Showing <strong>{{ visible_count if visible_count is defined else visible_groups|length }}</strong> of <strong>{{ total_groups }}</strong> groups
+  </span>
+  {% if filter_state.search %}
+    <button class="active-chip"
+            type="button"
+            hx-post="/filters"
+            hx-vals='{"facet": "search", "value": ""}'
+            hx-target="#groups"
+            hx-swap="innerHTML">
+      <span class="chip-facet">search</span>
+      <span class="chip-label">"{{ filter_state.search }}"</span>
+      <span aria-hidden="true">x</span>
+    </button>
+  {% endif %}
+  {% if filter_state.min_torrents > 1 %}
+    <button class="active-chip"
+            type="button"
+            aria-label="Remove multi-torrent filter"
+            hx-post="/filters"
+            hx-vals='{"facet": "min_torrents", "value": "1"}'
+            hx-target="#groups"
+            hx-swap="innerHTML">
+      <span class="chip-facet">groups</span>
+      <span class="chip-label">{{ filter_state.min_torrents }}+ torrents</span>
+      <span aria-hidden="true">x</span>
+    </button>
+  {% endif %}
+  {% set active_pairs = [] %}
+  {% for s in filter_state.statuses %}{% set _ = active_pairs.append(('status', s|string, false)) %}{% endfor %}
+  {% for c in filter_state.categories %}{% set _ = active_pairs.append(('category', c, false)) %}{% endfor %}
+  {% for t in filter_state.tags %}{% set _ = active_pairs.append(('tag', t, false)) %}{% endfor %}
+  {% for tr in filter_state.trackers %}{% set _ = active_pairs.append(('tracker', tr, false)) %}{% endfor %}
+  {% for s in filter_state.not_statuses %}{% set _ = active_pairs.append(('not_status', s|string, true)) %}{% endfor %}
+  {% for c in filter_state.not_categories %}{% set _ = active_pairs.append(('not_category', c, true)) %}{% endfor %}
+  {% for t in filter_state.not_tags %}{% set _ = active_pairs.append(('not_tag', t, true)) %}{% endfor %}
+  {% for tr in filter_state.not_trackers %}{% set _ = active_pairs.append(('not_tracker', tr, true)) %}{% endfor %}
+  {% for facet, value, negated in active_pairs %}
+    <button class="active-chip{% if negated %} not-chip{% endif %}"
+            type="button"
+            aria-label="Remove filter {{ facet }} {{ value }}"
+            hx-post="/filters"
+            hx-vals='{"facet": "{{ facet }}", "value": "{{ value|e }}"}'
+            hx-target="#groups"
+            hx-swap="innerHTML">
+      <span class="chip-facet">{% if negated %}NOT {% endif %}{{ facet[4:] if negated else facet }}</span>
+      <span class="chip-label">{{ value }}</span>
+      <span aria-hidden="true">x</span>
+    </button>
+  {% endfor %}
+  {% if active_pairs or filter_state.search %}
+    <button class="clear-link"
+            type="button"
+            hx-post="/filters/clear"
+            hx-target="#groups"
+            hx-swap="innerHTML">
+      Clear all
+    </button>
+  {% endif %}
+</div>

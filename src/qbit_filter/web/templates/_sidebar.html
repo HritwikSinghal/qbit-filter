@@ -1,0 +1,29 @@
+<div class="sidebar-inner">
+  <a class="sidebar-brand" href="/" aria-label="qbit-filter home">qbit-filter</a>
+
+  <div class="sidebar-header">
+    <h3>Filters</h3>
+    <button type="button"
+            class="clear-all"
+            hx-post="/filters/clear"
+            hx-target="#groups"
+            hx-swap="innerHTML"
+            {% if not active_count %}disabled aria-disabled="true"{% endif %}>
+      Clear all
+    </button>
+  </div>
+
+  <input type="search"
+         id="search-input"
+         name="search"
+         class="sidebar-search"
+         placeholder="Search title"
+         value="{{ filter_state.search or '' }}"
+         autocomplete="off"
+         hx-post="/filters/search"
+         hx-trigger="input changed delay:250ms, search"
+         hx-target="#groups"
+         hx-swap="innerHTML">
+
+  {% include "_filters.html" %}
+</div>

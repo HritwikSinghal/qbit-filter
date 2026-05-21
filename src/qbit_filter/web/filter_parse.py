@@ -1,0 +1,159 @@
+"""Form-data -> FilterState helpers. Filters are frozen; helpers return new copies."""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from qbit_filter.domain import FilterState, TorrentStatus
+
+Facet = Literal[
+    "status", "category", "tag", "tracker", "search", "min_torrents",
+    "not_status", "not_category", "not_tag", "not_tracker",
+]
+_FACETS: frozenset[str] = frozenset(
+    {
+        "status", "category", "tag", "tracker", "search", "min_torrents",
+        "not_status", "not_category", "not_tag", "not_tracker",
+    }
+)
+
+
+def is_facet(value: str) -> bool:
+    return value in _FACETS
+
+
+def toggle(fs: FilterState, facet: str, value: str) -> FilterState:
+    """Return a new :class:`FilterState` with ``value`` toggled in ``facet``.
+
+    For ``search``, ``value`` replaces the current text (empty string clears).
+    ``not_*`` facets toggle into the corresponding negative set; the inverse
+    set is automatically cleared of the same value so include/exclude are
+    mutually exclusive (clicking exclude on an already-included value flips it).
+    Unknown facets return the original state unchanged.
+    """
+    if facet == "search":
+        return _replace(fs, search=value)
+
+    if facet in ("status", "not_status"):
+        try:
+            status = TorrentStatus(value)
+        except ValueError:
+            return fs
+        if facet == "status":
+            statuses = set(fs.statuses) ^ {status}
+            return _replace(
+                fs,
+                statuses=frozenset(statuses),
+                not_statuses=frozenset(fs.not_statuses - {status}),
+            )
+        not_statuses = set(fs.not_statuses) ^ {status}
+        return _replace(
+            fs,
+            not_statuses=frozenset(not_statuses),
+            statuses=frozenset(fs.statuses - {status}),
+        )
+
+    if facet in ("category", "not_category"):
+        v = value.lower()
+        if facet == "category":
+            cats = set(fs.categories) ^ {v}
+            return _replace(
+                fs,
+                categories=frozenset(cats),
+                not_categories=frozenset(fs.not_categories - {v}),
+            )
+        not_cats = set(fs.not_categories) ^ {v}
+        return _replace(
+            fs,
+            not_categories=frozenset(not_cats),
+            categories=frozenset(fs.categories - {v}),
+        )
+
+    if facet in ("tag", "not_tag"):
+        if facet == "tag":
+            tags = set(fs.tags) ^ {value}
+            return _replace(
+                fs,
+                tags=frozenset(tags),
+                not_tags=frozenset(fs.not_tags - {value}),
+            )
+        not_tags = set(fs.not_tags) ^ {value}
+        return _replace(
+            fs,
+            not_tags=frozenset(not_tags),
+            tags=frozenset(fs.tags - {value}),
+        )
+
+    if facet in ("tracker", "not_tracker"):
+        if facet == "tracker":
+            trks = set(fs.trackers) ^ {value}
+            return _replace(
+                fs,
+                trackers=frozenset(trks),
+                not_trackers=frozenset(fs.not_trackers - {value}),
+            )
+        not_trks = set(fs.not_trackers) ^ {value}
+        return _replace(
+            fs,
+            not_trackers=frozenset(not_trks),
+            trackers=frozenset(fs.trackers - {value}),
+        )
+
+    if facet == "min_torrents":
+        try:
+            requested = int(value)
+        except (TypeError, ValueError):
+            return fs
+        new_min = 1 if (requested <= 1 or requested == fs.min_torrents) else requested
+        return _replace(fs, min_torrents=new_min)
+
+    return fs
+
+
+def set_search(fs: FilterState, text: str) -> FilterState:
+    return _replace(fs, search=text.strip())
+
+
+def clear() -> FilterState:
+    return FilterState()
+
+
+def active_count(fs: FilterState) -> int:
+    n = (
+        len(fs.statuses) + len(fs.categories) + len(fs.tags) + len(fs.trackers)
+        + len(fs.not_statuses) + len(fs.not_categories)
+        + len(fs.not_tags) + len(fs.not_trackers)
+    )
+    if fs.search:
+        n += 1
+    if fs.min_torrents > 1:
+        n += 1
+    return n
+
+
+def _replace(
+    fs: FilterState,
+    *,
+    statuses: frozenset[TorrentStatus] | None = None,
+    categories: frozenset[str] | None = None,
+    tags: frozenset[str] | None = None,
+    trackers: frozenset[str] | None = None,
+    not_statuses: frozenset[TorrentStatus] | None = None,
+    not_categories: frozenset[str] | None = None,
+    not_tags: frozenset[str] | None = None,
+    not_trackers: frozenset[str] | None = None,
+    search: str | None = None,
+    min_torrents: int | None = None,
+) -> FilterState:
+    return FilterState(
+        statuses=fs.statuses if statuses is None else statuses,
+        categories=fs.categories if categories is None else categories,
+        tags=fs.tags if tags is None else tags,
+        trackers=fs.trackers if trackers is None else trackers,
+        not_statuses=fs.not_statuses if not_statuses is None else not_statuses,
+        not_categories=fs.not_categories if not_categories is None else not_categories,
+        not_tags=fs.not_tags if not_tags is None else not_tags,
+        not_trackers=fs.not_trackers if not_trackers is None else not_trackers,
+        search=fs.search if search is None else search,
+        min_torrents=fs.min_torrents if min_torrents is None else min_torrents,
+    )

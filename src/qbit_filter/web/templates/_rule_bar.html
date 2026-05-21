@@ -1,0 +1,18 @@
+{# Rule-selector strip. Variables:
+     rules: list of (slug, label, description, implemented: bool, match_count: int) #}
+<div id="rule-bar" class="rule-bar">
+  <h3>Cleanup rule</h3>
+  <div class="rule-chips">
+    {% for r in rules %}
+      <button class="chip rule-chip"
+              data-slug="{{ r.slug }}"
+              {% if not r.implemented %}disabled aria-disabled="true"{% endif %}
+              hx-post="/rules/{{ r.slug }}/preview"
+              hx-target="#groups"
+              hx-swap="innerHTML">
+        {{ r.label }}
+        {% if r.implemented %}<span class="count">{{ r.match_count }}</span>{% endif %}
+      </button>
+    {% endfor %}
+  </div>
+</div>

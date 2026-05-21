@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<header class="app-bar">
+  <button class="btn" id="open-filters" aria-label="Open filters">Filters</button>
+  <span class="brand">qbit-filter</span>
+  <div class="spacer"></div>
+  <span class="meta">
+    {{ total_torrents }} torrents &middot; {{ total_groups }} groups
+  </span>
+  <span class="live" aria-live="polite">live</span>
+  <button class="btn" id="theme-toggle" aria-label="Toggle theme">Theme</button>
+</header>
+
+<div class="shell">
+  <aside id="filter-drawer" class="sidebar">
+    {% include "_sidebar.html" %}
+  </aside>
+
+  <main class="main">
+    <div id="rule-bar-slot"
+         hx-get="/rules"
+         hx-trigger="load"
+         hx-swap="innerHTML"></div>
+
+    <div id="active-filters" aria-live="polite">
+      {% include "_active_filters.html" %}
+    </div>
+
+    {# Inline before the streamed group cards so handlers attach immediately
+       instead of waiting for DOMContentLoaded -- which under StreamingResponse
+       only fires after the whole 600+ group payload arrives. #}
+    <script>
+      window.QF_CACHE_VERSION = {{ cache_version | default(0) | tojson }};
+      window.QF_CACHE_MODE = {{ cache_mode | default(false) | tojson }};
+    </script>
+    <script src="/static/keys.js"></script>
+
+    {# First-load progress overlay. Hidden when the cache paint succeeds
+       (handled in keys.js: cache paint inserts cards immediately, so the
+       MutationObserver fires before this is shown). If no cache, this
+       sits above an empty #groups until the streamed render delivers the
+       first .group-card. #}
+    <div id="first-load" class="first-load" hidden>
+      <div class="fl-card">
+        <div class="fl-title">Loading torrent list</div>
+        <div class="fl-bar"><div class="fl-bar-fill" id="fl-bar-fill"></div></div>
+        <ol class="fl-log" id="fl-log" aria-live="polite"></ol>
+      </div>
+    </div>
+
+    <div id="groups-container"
+         hx-ext="sse"
+         sse-connect="/sse"
+         sse-swap="message"
+         hx-swap="none">
+      <div id="groups">
+        {% if cache_mode %}
+        {# Paint the cached group HTML in place. Runs while the parser is
+           inside #groups so document.getElementById('groups') resolves and
+           children can be appended synchronously, before HTMX/SSE even
+           initialise. #}
+        <script>window.qfPaintCache && window.qfPaintCache();</script>
+        {% endif %}
+        {% if stream_mode %}
+<!--QF_STREAM_INSERT-->
+        {% elif visible_groups %}
+          {% for group, torrents, seasons in visible_groups %}
+            {% include "_group.html" %}
+          {% endfor %}
+        {% else %}
+          {% include "_empty.html" %}
+        {% endif %}
+      </div>
+    </div>
+
+    {% include "_selection_bar.html" %}
+  </main>
+</div>
+{% endblock %}

@@ -1,0 +1,81 @@
+/* Operator Console design tokens. Imported first; every other stylesheet
+   builds on these variables. */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  /* Surfaces -- dark default */
+  --bg-deep: #050506;
+  --bg-base: #0a0a0c;
+  --bg-elevated: #111114;
+  --surface: #14141a;
+  --surface-hi: #1a1a22;
+
+  /* Text */
+  --fg: #ededef;
+  --fg-muted: #8a8f98;
+  --fg-dim: #545861;
+
+  /* Borders */
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+
+  /* Accent / semantic */
+  --accent: #5e6ad2;
+  --accent-hover: #6f7be0;
+  --accent-soft: rgba(94, 106, 210, 0.16);
+  --danger: #e5484d;
+  --danger-soft: rgba(229, 72, 77, 0.14);
+  --success: #46a758;
+  --warning: #f5a623;
+
+  /* Quality tier colors (used on badges + comparison strips) */
+  --tier-2160: #b794f6;
+  --tier-1080: #63b3ed;
+  --tier-720:  #68d391;
+  --tier-sd:   #fbb360;
+  --tier-unknown: var(--fg-dim);
+
+  /* Layout */
+  --sidebar-w: 264px;
+  --appbar-h: 56px;
+  --row-h: 56px;
+  --content-max: 1400px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* Type scale */
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --t-xs: 11px;
+  --t-sm: 12px;
+  --t-md: 13px;
+  --t-lg: 15px;
+  --t-xl: 18px;
+
+  color-scheme: dark;
+}
+
+/* Light mode override -- triggered by body.light, set by theme picker. */
+body.light {
+  --bg-deep: #fafafa;
+  --bg-base: #ffffff;
+  --bg-elevated: #f4f4f5;
+  --surface: #ffffff;
+  --surface-hi: #f9f9fb;
+  --fg: #18181b;
+  --fg-muted: #52525b;
+  --fg-dim: #a1a1aa;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --accent-soft: rgba(94, 106, 210, 0.10);
+  color-scheme: light;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}

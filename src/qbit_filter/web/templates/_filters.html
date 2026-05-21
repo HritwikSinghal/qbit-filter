@@ -1,0 +1,75 @@
+<div id="filter-facets" class="filter-facets">
+  <div class="toggle-row">
+    <button class="toggle-pill"
+            type="button"
+            aria-pressed="{{ 'true' if filter_state.min_torrents > 1 else 'false' }}"
+            hx-post="/filters"
+            hx-vals='{"facet": "min_torrents", "value": "2"}'
+            hx-target="#groups"
+            hx-swap="innerHTML">
+      <span>Multiple torrents only</span>
+      <span class="toggle-count">{{ counts.multi_groups }}</span>
+    </button>
+  </div>
+  {% set facet_specs = [
+    ('status',   counts.status,   'Status'),
+    ('category', counts.category, 'Category'),
+    ('tag',      counts.tag,      'Tags'),
+    ('tracker',  counts.tracker,  'Trackers'),
+  ] %}
+  {% for facet, values, label in facet_specs %}
+    {% if values %}
+      <details class="facet" open>
+        <summary>
+          <span class="facet-label">{{ label }}</span>
+          <span class="chevron" aria-hidden="true">v</span>
+        </summary>
+        <div class="facet-chips">
+          {% set active_set = (
+              filter_state.statuses if facet == 'status' else
+              filter_state.categories if facet == 'category' else
+              filter_state.tags if facet == 'tag' else
+              filter_state.trackers
+          ) %}
+          {% set not_set = (
+              filter_state.not_statuses if facet == 'status' else
+              filter_state.not_categories if facet == 'category' else
+              filter_state.not_tags if facet == 'tag' else
+              filter_state.not_trackers
+          ) %}
+          {# Each facet value is a chip-pair: the main chip toggles include;
+             the small minus button toggles exclude. Shift-click on the main
+             chip also sends ``not_<facet>`` (legacy affordance from keys.js).
+             ``aria-pressed`` reflects whichever mode the chip is in. #}
+          {% for value, count in values.items() %}
+            {% set is_active = value in active_set %}
+            {% set is_excluded = value in not_set %}
+            <span class="facet-chip-pair{% if is_excluded %} excluded{% elif is_active %} included{% endif %}">
+              <button class="chip facet-chip"
+                      type="button"
+                      aria-pressed="{{ 'true' if is_active else 'false' }}"
+                      data-facet="{{ facet }}"
+                      title="Click: include only. Shift-click or use minus button: exclude."
+                      hx-post="/filters"
+                      hx-vals='{"facet": "{{ facet }}", "value": "{{ value|e }}"}'
+                      hx-target="#groups"
+                      hx-swap="innerHTML">
+                <span class="chip-label">{% if is_excluded %}NOT {% endif %}{{ value }}</span>
+                <span class="chip-count">{{ count }}</span>
+              </button>
+              <button class="facet-exclude"
+                      type="button"
+                      aria-pressed="{{ 'true' if is_excluded else 'false' }}"
+                      aria-label="Exclude {{ value }}"
+                      title="Exclude {{ value }} from results"
+                      hx-post="/filters"
+                      hx-vals='{"facet": "not_{{ facet }}", "value": "{{ value|e }}"}'
+                      hx-target="#groups"
+                      hx-swap="innerHTML">{% if is_excluded %}+{% else %}&#8722;{% endif %}</button>
+            </span>
+          {% endfor %}
+        </div>
+      </details>
+    {% endif %}
+  {% endfor %}
+</div>

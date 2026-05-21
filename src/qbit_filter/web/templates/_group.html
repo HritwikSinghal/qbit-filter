@@ -1,0 +1,36 @@
+{# Group card -- always-visible 1/4 left meta + 3/4 right rows.
+   Variables:
+     group           Group dataclass
+     torrents        list[Torrent] (already ordered: best quality first)
+     seasons         list[int] (TV only; empty for movies)
+     rule_marks      dict[str, str]  -- {torrent_hash: reason}; optional
+#}
+<article id="group-{{ group.key.slug() }}" class="group-card">
+  <div class="group-meta">
+    <h2 class="title">{{ group.title }}</h2>
+    <div class="sub">
+      {% if group.year %}{{ group.year }} {% endif %}
+      {{ group.kind.value }}
+      {% if torrents %}
+        <span id="group-{{ group.key.slug() }}-count">{{ torrents | length }} item{{ '' if torrents | length == 1 else 's' }}</span>
+      {% endif %}
+    </div>
+    {% if seasons %}
+      <div class="seasons">
+        {% for s in seasons[:8] %}<span class="season-chip">S{{ '%02d' | format(s) }}</span>{% endfor %}
+        {% if seasons | length > 8 %}<span class="season-chip">+{{ seasons | length - 8 }}</span>{% endif %}
+      </div>
+    {% endif %}
+    {% set marked_in_group = rule_marks | default({}) %}
+    {% if marked_in_group %}
+      <div class="rule-match">{{ marked_in_group | length }} marked for cleanup</div>
+    {% endif %}
+  </div>
+  <div class="group-rows" id="group-{{ group.key.slug() }}-rows">
+    {% for t in torrents %}
+      {% set reason = (rule_marks | default({})).get(t.hash) %}
+      {% set marked = reason is not none %}
+      {% include '_torrent.html' with context %}
+    {% endfor %}
+  </div>
+</article>
