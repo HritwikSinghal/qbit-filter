@@ -1,5 +1,5 @@
 # Project: qbit-filter
-> Last updated: 2026-05-21 | Session: 5
+> Last updated: 2026-05-21 | Session: 6
 
 ## Current state
 
@@ -148,6 +148,41 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim --
 | Phase 9: Polish + Nix packaging | In progress | 1/6 |
 
 ## Significant changes
+
+### Client-side perf hardening pass 2 (2026-05-21, session 6)
+
+Targeted the choke points causing browser lag when the catalogue is fully
+loaded (smooth when empty, laggy when full). Six surgical edits in
+`keys.js` + `custom.css`; no Python / template changes.
+
+1. **`contain-intrinsic-size` was wrong.** `.group-card` had `120px`
+   but real cards are 200-800 px tall, so `content-visibility: auto`
+   kept re-measuring layout as cards scrolled into view. Switched to
+   `auto 480px` so the browser caches per-element measured size after
+   first paint.
+2. **IntersectionObserver re-attach storm.** Viewport observer's
+   `attach()` ran `querySelectorAll('.group-card')` (walks 622 cards)
+   on every `htmx:oobAfterSwap`; under a RESYNC that fires dozens of
+   times per second. Added a `WeakSet` of already-observed nodes and
+   gated `attach` on the swap target being inside `#groups`.
+3. **Marked-row scan storm.** `htmx:afterSwap` callback was walking
+   all 1310 rows looking for `data-marked="true"` on every per-row OOB
+   swap. Restricted to swaps that actually replace `#groups` /
+   `rule-bar-slot`, and scoped `querySelectorAll` to the swapped
+   subtree.
+4. **`repaintSelectionFooter` per-hash `querySelector` storm.**
+   Footer sum did `document.querySelector('.torrent-row[data-hash=X]')`
+   per selected hash. Switched `selection` from `Set<hash>` to
+   `Map<hash, bytes>` populated at check-time. Footer total is now an
+   O(N) iteration of small in-memory values with no DOM access.
+5. **localStorage cache write throttle.** `saveCacheNow` was a sync
+   ~900 KB serialisation + `localStorage.setItem` on the main thread
+   every 5 s. Wrapped in `requestIdleCallback`, added a 2 MB cap, and
+   bumped debounce to 10 s.
+6. **Dropped per-group stacking context.** `.group-card` had
+   `overflow: hidden` purely for rounded-corner clipping, which forced
+   622 stacking contexts. Replaced with explicit corner radii on
+   `.group-meta` and `.torrent-row:last-child`.
 
 ### Perf hardening (2026-05-21)
 

@@ -465,9 +465,8 @@ button { font: inherit; cursor: pointer; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  overflow: hidden;
   content-visibility: auto;
-  contain-intrinsic-size: 120px;
+  contain-intrinsic-size: auto 480px;
 }
 .group-card:hover { border-color: var(--border-strong); }
 
@@ -475,6 +474,13 @@ button { font: inherit; cursor: pointer; }
   padding: 12px 14px;
   border-right: 1px solid var(--border);
   background: var(--bg-elevated);
+  border-top-left-radius: var(--radius-md);
+  border-bottom-left-radius: var(--radius-md);
+}
+@media (max-width: 1023px) {
+  .group-meta {
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
 }
 .group-meta .title {
   font-weight: 600;
@@ -525,7 +531,13 @@ button { font: inherit; cursor: pointer; }
   font-family: var(--font-mono);
   font-size: var(--t-sm);
 }
-.torrent-row:last-child { border-bottom: none; }
+.torrent-row:last-child {
+  border-bottom: none;
+  border-bottom-right-radius: var(--radius-md);
+}
+@media (max-width: 1023px) {
+  .torrent-row:last-child { border-bottom-left-radius: var(--radius-md); }
+}
 .torrent-row[data-marked='true'] {
   background: var(--danger-soft);
 }
