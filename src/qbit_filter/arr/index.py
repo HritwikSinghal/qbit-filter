@@ -19,7 +19,7 @@ from qbit_filter.arr.models import (
     QueueRecord,
 )
 from qbit_filter.domain import Torrent
-from qbit_filter.grouping.parser import normalise_title
+from qbit_filter.grouping.parser import normalise_title, parse
 
 logger = logging.getLogger(__name__)
 
@@ -221,35 +221,22 @@ def _match_by_title(
     radarr_tag_labels: dict[int, str],
     sonarr_tag_labels: dict[int, str],
 ) -> ArrMatch | None:
-    """Fuzzy title fallback. Uses :func:`normalise_title` so qBit and arr
-    titles collapse the same way (drops punctuation, case-folds, removes
-    common release noise). Year-aware for movies; series match on title only.
+    """Fuzzy title fallback. Routes the raw torrent name through guessit
+    (cached in ``grouping.parser``) to recover the clean show/movie title
+    and year, then normalises that with :func:`normalise_title` so the
+    lookup key matches arr's stored titles. Necessary because TV releases
+    rarely carry a year token, so a prefix-cut on the raw name leaves the
+    release noise (``S01.1080p.WEB-DL.x265-GRP``) glued to the title and
+    nothing in ``series_by_norm`` ever matches.
     """
-    # guessit is expensive; cheap normalisation against the raw torrent name is
-    # already done elsewhere via grouping/parser.py. We re-use the cheap form
-    # here: normalise the torrent name, then prefix-trim numeric tails.
-    name_norm = normalise_title(t.name)
-    if not name_norm:
+    parsed = parse(t.name)
+    title_norm = normalise_title(parsed.title)
+    if not title_norm:
         return None
     h = t.hash.lower()
-    # Try movies with year first (most precise). Series indexed by title only.
-    # Some series share titles across years (rare); v1 ignores that.
-    # Year extraction: grab the first 4-digit token between 1900-2099.
-    year: int | None = None
-    for token in name_norm.split():
-        if token.isdigit() and len(token) == 4:
-            candidate = int(token)
-            if 1900 <= candidate <= 2099:
-                year = candidate
-                break
-    # The title we look up is the prefix before the year token, when present.
-    title_only = name_norm
+    year = parsed.year
     if year is not None:
-        cut = name_norm.find(str(year))
-        if cut > 0:
-            title_only = name_norm[:cut].strip()
-    if year is not None:
-        m = movies_by_norm.get((title_only, year))
+        m = movies_by_norm.get((title_norm, year))
         if m is not None:
             return _movie_match(
                 m,
@@ -258,7 +245,7 @@ def _match_by_title(
                 history=radarr_history.get(h),
                 tag_labels=radarr_tag_labels,
             )
-    m = movies_by_norm_no_year.get(title_only)
+    m = movies_by_norm_no_year.get(title_norm)
     if m is not None:
         return _movie_match(
             m,
@@ -267,7 +254,7 @@ def _match_by_title(
             history=radarr_history.get(h),
             tag_labels=radarr_tag_labels,
         )
-    s = series_by_norm.get(title_only)
+    s = series_by_norm.get(title_norm)
     if s is not None:
         return _series_match(
             s,

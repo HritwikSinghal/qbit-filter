@@ -202,10 +202,11 @@ _FREELEECH_PENALTY_WINDOW_DAYS = 10
 class DuplicateSameQualityRule:
     """Within one group, multiple torrents at the same quality tier.
 
-    Keep the oldest (it has the longest seed history and is least likely to
-    trigger a freeleech penalty if removed); flag every newer same-tier
-    copy. Complementary to :class:`SupersededQualityRule` -- where that one
-    handles the cross-tier case, this one handles the same-tier case.
+    Keep the newest (an arr-side upgrade or repack -- arr only re-grabs
+    when it considers the new release better than what's on disk); flag
+    every older same-tier copy. Complementary to
+    :class:`SupersededQualityRule` -- where that one handles the
+    cross-tier case, this one handles the same-tier case.
 
     Source / codec mismatches between the keeper and the flagged copy are
     surfaced as neutral pills so a user keeping both a WEB-DL and a BluRay
@@ -221,8 +222,8 @@ class DuplicateSameQualityRule:
     slug: str = "duplicate-same-quality"
     label: str = "Duplicate (same quality)"
     description: str = (
-        "Multiple torrents at the same quality tier. Keep the oldest copy, "
-        "flag the newer arrivals."
+        "Multiple torrents at the same quality tier. Keep the newest copy "
+        "(typically an arr upgrade or repack), flag the older arrivals."
     )
     freeleech_window_days: int = _FREELEECH_PENALTY_WINDOW_DAYS
 
@@ -250,7 +251,8 @@ class DuplicateSameQualityRule:
                 for tier, bucket in by_tier.items():
                     if len(bucket) < 2:
                         continue
-                    bucket.sort(key=lambda t: t.added_on)
+                    # Newest first: arr's most recent grab is the keeper.
+                    bucket.sort(key=lambda t: t.added_on, reverse=True)
                     keeper = bucket[0]
                     for t in bucket[1:]:
                         factors: list[ReasonFactor] = [
@@ -279,7 +281,7 @@ class DuplicateSameQualityRule:
                             )
                             severity = "warning"
                         gap_days = max(
-                            0, (t.added_on - keeper.added_on) // 86_400
+                            0, abs(t.added_on - keeper.added_on) // 86_400
                         )
                         out.append(
                             Candidate(
@@ -287,7 +289,7 @@ class DuplicateSameQualityRule:
                                 group_key=key,
                                 reason=(
                                     f"duplicate {tier.value} "
-                                    f"(added {gap_days}d after keeper)"
+                                    f"(added {gap_days}d before keeper)"
                                 ),
                                 keeper_hash=keeper.hash,
                                 factors=tuple(factors),
