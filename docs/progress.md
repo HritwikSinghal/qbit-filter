@@ -3,31 +3,67 @@
 
 ## Current state
 
-Phase 9.0 (visual verification sweep) complete. Browser-cache feature
-partially landed (server `cache_mode` + client paint flow works;
-save-on-settle flaky under SSE storm -- deferred). Remaining: Phase 9
-Nix packaging (proper derivation replacing the `writeShellApplication`
-shim) + final docs / acceptance pass.
+Phase 9.0 (visual verification sweep) complete. Session 6 landed a
+client-side perf hardening pass to address user-reported browser lag
+under the full 1310-torrent / 622-group catalogue (six surgical edits
+in `keys.js` + `custom.css`, see Significant Changes). Phase 9 Nix
+packaging is still open.
 
-Smoke verification: 1310 torrents classified into 622 groups against
-the live qBit. Initial `/` is a `StreamingResponse` (chrome flushed
-first, group cards rendered in an 8-worker thread pool with a 16 KB
-flush buffer). SSE keeps the page warm.
+Smoke verification baseline: 1310 torrents classified into 622 groups
+against the live qBit. Initial `/` is a `StreamingResponse` (chrome
+flushed first, group cards rendered in an 8-worker thread pool with a
+16 KB flush buffer). SSE keeps the page warm. Browser-cache flow:
+server `cache_mode` + client paint from `localStorage` both wired up;
+cookie + `CACHE_VERSION` gates promotion.
 
-Pickup priorities:
-1. **Browser-cache save flake.** Save callback debounces forever
-   under the SSE event storm (RESYNC fires dozens of
-   `htmx:oobAfterSwap` events in rapid succession, each resetting
-   the 750 ms timer). Save success rate ~50% across 5 cold-start
-   runs. Fix sketch: save once on `window.load` synchronously before
-   SSE storms in, then debounce subsequent saves at 5-10 s. The
-   server-side path lands cleanly (2.4 MB cached, ~400 ms
-   time-to-first-card on cached reload, ~85x payload reduction).
-2. **Nix flake derivation (Phase 9.4).** Convert the
+Pickup priorities (in order):
+
+1. **Verify the session-6 perf wins in a real browser.** Open the
+   live page (full catalogue loaded) and take a DevTools Performance
+   trace before/after. Expected: scroll Rendering time drops sharply
+   (Fix 1 -- `contain-intrinsic-size`), Scripting on SSE-idle drops to
+   near-quiet (Fixes 2 + 3 -- observer + marked-row guards), and
+   selecting 100+ rows feels instant (Fix 4 -- selection Map). Note
+   any remaining hot paths in a new session-7 entry. Until this is
+   done, the fixes are unverified.
+
+2. **Re-test browser-cache save reliability.** Fix 5 wrapped
+   `localStorage.setItem` in `requestIdleCallback`, capped payload at
+   2 MB, and bumped debounce 5 s -> 10 s. Combined with the existing
+   `window.load` immediate save, the original ~50% cold-start flake
+   should be resolved. Cold-start the page 5 times, confirm
+   `localStorage[qf_groups_cache_v0]` is populated after each. If
+   still flaky, the next lever is to drop the save entirely from
+   `htmx:oobAfterSwap` and keep it only on `htmx:afterSettle`.
+
+3. **Nix flake derivation (Phase 9.4).** Convert the
    `writeShellApplication` shim in `flake.nix` into a proper Python
-   derivation.
+   derivation. Then 9.3 / 9.5 / 9.6 fall in line.
 
-**Always run before commit:** `ruff check && mypy --strict`.
+4. **README + CLAUDE.md final pass (Phase 9.2).** Note: CLAUDE.md
+   currently has uncommitted local edits (pre-existing, not from
+   session 6) -- check `git diff CLAUDE.md` before editing.
+
+5. **Tests backfill.** No `tests/` directory yet. CLAUDE.md says
+   `python3 -m pytest tests/ -v` is required before commit, but
+   there's nothing to run. Memory note `[[feedback_defer_tests]]`
+   captures the intent: tests are deferred and run in a dedicated
+   backfill pass. Pick this up after Nix packaging lands.
+
+**Out-of-scope (deferred, lower priority):**
+- Lazy-render torrent rows per group (would halve DOM count again;
+  is a real refactor -- not needed if session-6 wins suffice).
+- Server-side: batch per-tick OOB swaps into one fragment per group
+  per tick (current bottleneck is client-side, not server payload).
+- Replace per-row `border-bottom` with parent `gap` (small win,
+  larger CSS churn).
+- Move `Reconciler._rebuild` into `asyncio.to_thread` (needs queue
+  refactor; `Subscription.queue` is `asyncio.Queue`, not thread-safe).
+
+**Always run before commit:** `ruff check && mypy --strict`. (mypy
+not on $PATH in dev shells; use `uv run mypy --strict src/qbit_filter`
+or install via `uv tool install mypy`.) Test suite does not exist
+yet -- see priority 5.
 
 ## Architecture (one-liners)
 
@@ -127,6 +163,9 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim --
 
 ### Phase 9: Polish + Nix packaging  ← in progress
 - [x] 9.0 Visual verification sweep -- 8 screenshots, 6 regressions fixed
+- [x] 9.1 Client-side perf hardening pass 2 (session 6) -- six edits
+      in `keys.js` + `custom.css`; verification still pending
+      (priority 1 in Current State)
 - [ ] 9.2 README + CLAUDE.md final pass
 - [ ] 9.3 Verify Python deps exist in nixpkgs
 - [ ] 9.4 Proper `flake.nix` Python derivation (replace shim) + `nix flake lock`
@@ -145,7 +184,7 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim --
 | Phase 6: SSE live updates | Done | 1/1 |
 | Phase 7: Filters | Done | 1/1 |
 | Phase 8: Actions | Done | 2/2 |
-| Phase 9: Polish + Nix packaging | In progress | 1/6 |
+| Phase 9: Polish + Nix packaging | In progress | 2/7 |
 
 ## Significant changes
 
@@ -354,6 +393,50 @@ diff-update from SSE" (no full replace).
 
 ## Decisions & Notes
 <!-- Append entries as: YYYY-MM-DD: [decision or important note] -->
+- 2026-05-21 (session 6): `selection` is now `Map<hash, bytes>`, not
+  `Set<hash>`. Bytes captured at check-time from the row's
+  `data-bytes` attribute. Reason: footer total summed bytes by doing
+  `document.querySelector('.torrent-row[data-hash=X]')` per selected
+  hash, which was O(N) DOM queries per checkbox click. With the Map,
+  the footer is a pure in-memory sum. Touches: `change` handler,
+  `repaintSelectionFooter`, `applyDelete`, the `htmx:afterSwap`
+  marked-row pass.
+- 2026-05-21 (session 6): `htmx:afterSwap` marked-row scanner is
+  now gated on `target.id` being `groups` or `rule-bar-slot`
+  specifically -- not the looser `target.querySelector('.group-card')`
+  check. Reason: per-row OOB swaps from the SSE storm matched the
+  loose check (any swap inside a group card has `.group-card` in
+  its subtree) and triggered a 1310-row document scan per tick. The
+  tighter check restricts the scan to swaps that actually replace
+  the group payload.
+- 2026-05-21 (session 6): `IntersectionObserver` viewport attach
+  uses a `WeakSet<Element>` of already-observed cards plus a
+  swap-target guard. Reason: the previous attach() walked all 622
+  `.group-card` nodes per `htmx:oobAfterSwap` and re-called
+  `observe()` on each; under a RESYNC that fired dozens of times
+  per second. `observe()` is a no-op on already-observed nodes but
+  the querySelectorAll walk was not free.
+- 2026-05-21 (session 6): `localStorage` cache write deferred to
+  `requestIdleCallback` with a 2 MB payload cap and a 10 s debounce.
+  Reason: serialising ~900 KB of `#groups.innerHTML` and writing it
+  synchronously every 5 s was stalling input for 50-150 ms per
+  write. The original 750 ms debounce that flaked under SSE storm
+  is gone -- 10 s is long enough to coalesce a RESYNC burst, and the
+  `window.load` immediate save still guarantees a first snapshot
+  before SSE storms in.
+- 2026-05-21 (session 6): `.group-card` no longer has
+  `overflow: hidden`. Reason: it was forcing 622 stacking contexts
+  whose only job was clipping rounded corners. Corner clipping is
+  now handled by per-child border-radius rules on `.group-meta`
+  (top-left + bottom-left) and `.torrent-row:last-child` (bottom-
+  right). Mobile breakpoint flips the radii to top + bottom.
+- 2026-05-21 (session 6): `.group-card` `contain-intrinsic-size`
+  changed from `120px` to `auto 480px`. Reason: 120 px was far
+  smaller than a real card (200-800 px), so `content-visibility:
+  auto` kept re-measuring layout as cards scrolled into view -- the
+  exact thing the property is supposed to avoid. The `auto` keyword
+  lets the browser remember per-element measured size after first
+  paint.
 - 2026-05-21 (session 5): App-bar switched from `position: sticky`
   to `position: fixed`. Beer CSS's
   `*:has(>nav.drawer.left:not(.s,.m,.l))` rule indents body by

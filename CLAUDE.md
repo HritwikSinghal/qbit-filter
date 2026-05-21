@@ -4,10 +4,20 @@ A local web UI grouping qBittorrent torrents by movie/TV show.
 
 ## End goal (read first)
 
-**qbit-filter is a rule-based cleanup tool, not a monitoring dashboard.** The user
-opens it occasionally to find and bulk-remove superseded or unwanted torrents,
-review what a rule caught, and confirm a batch delete. Realtime SSE updates
-matter less than comparison, reasoning, and per-row override.
+**qbit-filter is a general qBittorrent management tool built around an
+extensible set of selection criteria / rule presets.** It is not a monitoring
+dashboard, and it is not a single-purpose upgrade-detector. The user opens it
+occasionally to find and bulk-remove (or otherwise act on) torrents that match
+a rule, review what the rule caught, and confirm a batch operation. Realtime
+SSE updates matter less than comparison, reasoning, and per-row override.
+
+The rule set will grow over time -- "quality upgrade check" (mark 1080p when a
+newer 2160p of the same title exists) is the first preset, not the whole
+project. Treat the cleanup engine (`cleanup/registry.py` + `cleanup/rules.py`)
+as a plugin surface: adding a new criterion should be a small, well-isolated
+change, not a refactor. Don't bake assumptions about any one rule into shared
+infrastructure (selection UI, group layout, action surface, persistence) --
+those layers must serve N rules.
 
 Primary workflow:
 1. Pick a saved rule preset (e.g. "Superseded quality").
@@ -17,7 +27,7 @@ Primary workflow:
 3. User reviews per-group, deselects mistakes, confirms.
 4. Bulk delete runs through `qbit/actions.py`.
 
-Core rule presets to support:
+Core rule presets to support (non-exhaustive -- more will be added):
 - **Superseded quality** -- same title has 1080p and 2160p (or 720p/1080p, x264/x265,
   WEB-DL/BluRay at same resolution) and the older/lower was added first. Mark the lower.
 - **Stalled + old** -- added > 90d, no peers in 7d, ratio < 1.0.
