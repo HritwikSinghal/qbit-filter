@@ -3,76 +3,190 @@
 
 ## Current state
 
-Phase 9.0 (visual verification sweep) complete. Session 6 landed a
-client-side perf hardening pass to address user-reported browser lag
-under the full 1310-torrent / 622-group catalogue (six surgical edits
-in `keys.js` + `custom.css`, see Significant Changes). Phase 9 Nix
-packaging is still open.
+**Phase 11 (Radarr / Sonarr integration) committed in `65b403e`.**
+New `src/qbit_filter/arr/` package + `state/arr_store.py`, two
+*arr-aware cleanup rules, library-derived filter facets, posters
+hot-linked from arr instances, monitored/cutoff badges in the
+group meta and per-row monitored eye. End-to-end exercised in
+unit-level smoke tests; **not yet exercised against a live
+Radarr/Sonarr** -- credentials are intentionally absent from
+`.env`, and the *arr poller exits cleanly when both URLs are
+blank (no behaviour change for existing setups).
 
-Smoke verification baseline: 1310 torrents classified into 622 groups
-against the live qBit. Initial `/` is a `StreamingResponse` (chrome
-flushed first, group cards rendered in an 8-worker thread pool with a
-16 KB flush buffer). SSE keeps the page warm. Browser-cache flow:
-server `cache_mode` + client paint from `localStorage` both wired up;
-cookie + `CACHE_VERSION` gates promotion.
+Phase 9 (Nix packaging + final README pass) is still partially
+open. Browser-cache flow + session-6 perf wins remain unverified
+against the live page (carry-overs from session 7).
 
-Pickup priorities (in order):
+Smoke baseline still holds: ~1310 torrents -> ~622 groups on the
+production qBit. Initial `/` is a `StreamingResponse` (chrome
+flushed first, group cards rendered in an 8-worker thread pool
+with a 16 KB flush buffer). SSE keeps the page warm. Browser
+cache: server `cache_mode` + client paint from `localStorage`;
+cookie + `CACHE_VERSION` (now **5**) gates promotion.
 
-1. **Verify the session-6 perf wins in a real browser.** Open the
-   live page (full catalogue loaded) and take a DevTools Performance
-   trace before/after. Expected: scroll Rendering time drops sharply
-   (Fix 1 -- `contain-intrinsic-size`), Scripting on SSE-idle drops to
-   near-quiet (Fixes 2 + 3 -- observer + marked-row guards), and
-   selecting 100+ rows feels instant (Fix 4 -- selection Map). Note
-   any remaining hot paths in a new session-7 entry. Until this is
-   done, the fixes are unverified.
+### Pickup priorities (in order)
 
-2. **Re-test browser-cache save reliability.** Fix 5 wrapped
-   `localStorage.setItem` in `requestIdleCallback`, capped payload at
-   2 MB, and bumped debounce 5 s -> 10 s. Combined with the existing
-   `window.load` immediate save, the original ~50% cold-start flake
-   should be resolved. Cold-start the page 5 times, confirm
-   `localStorage[qf_groups_cache_v0]` is populated after each. If
-   still flaky, the next lever is to drop the save entirely from
-   `htmx:oobAfterSwap` and keep it only on `htmx:afterSettle`.
+1. **Wire Radarr + Sonarr credentials and exercise live.** Add
+   `RADARR_URL` / `RADARR_API_KEY` / `SONARR_URL` /
+   `SONARR_API_KEY` to `.env` (see `.env.example`). Boot the app
+   and walk through:
+   - Sidebar "Library (arr)" section appears.
+   - Movie groups render posters in the 1/4 meta panel.
+   - Group meta shows source badge (R/S), monitored
+     (monitored/unmonitored), and cutoff (`cutoff [OK]` /
+     `upgrade pending`).
+   - Rule bar lists `arr-cutoff-met-cold` and `arr-unmonitored`
+     with non-zero counts (assuming the live library has any
+     matching torrents).
+   - Filter chips for `Monitored` / `Unmonitored` / `Orphan` /
+     `Cutoff met` / `Upgrade pending` round-trip through the
+     `/filters` POST and visibly change the view.
+   - Stop Radarr mid-session; confirm the qBit panel keeps
+     updating, the arr poller logs `arr fetch failed for radarr`
+     warnings, and recovers when Radarr returns.
+   - Toggle `ARR_TITLE_FALLBACK=false`, restart, confirm
+     title-fallback matches drop out of `arr-unmonitored`
+     candidate count.
 
-3. **Nix flake derivation (Phase 9.4).** Convert the
-   `writeShellApplication` shim in `flake.nix` into a proper Python
-   derivation. Then 9.3 / 9.5 / 9.6 fall in line.
+2. **Phase 11 follow-ups (high leverage).** Each is independently
+   landable; pick the one that's biting most.
+   - **Identity-based regrouping** -- merge two qBit groups that
+     share a TMDB/TVDB id from arr (e.g. "Dune 2021" vs "Dune
+     Part One 2021"). Lives in `state/views.py` as a post-pass
+     after `apply_filters`; the grouper itself stays pure. Plan
+     section "Part A.C".
+   - **Sonarr-aware season grid** -- replace the flat
+     `[S01][S02][S03]` chips with `[S01 OK 10/10][S03 X 7/10]`.
+     Data already available on `ArrSeries.season_monitored` +
+     `episode_file_count` / `total_episode_count`; needs a new
+     `_season_grid.html` partial and a small `views.py` helper.
+   - **Below-cutoff anti-rule** -- defensive rule that *warns*
+     when `SupersededQualityRule` would mark a 1080p but arr is
+     actively searching for an upgrade
+     (`quality_cutoff_met == False`). Surface as a yellow
+     `severity="warning"` factor on the row, NOT a separate rule
+     in the bar.
+   - **Open in Radarr/Sonarr deep-link** -- shared kebab menu in
+     `index.html` gains an extra item using the
+     `arr_meta.title_slug` and the `radarr_url` / `sonarr_url`
+     already on `ArrStore`.
 
-4. **README + CLAUDE.md final pass (Phase 9.2).** Note: CLAUDE.md
-   currently has uncommitted local edits (pre-existing, not from
-   session 6) -- check `git diff CLAUDE.md` before editing.
+3. **Poster proxy endpoint.** Posters today hot-link with the
+   API key in the query string. Acceptable for the current
+   LAN-only deployment; needs `/poster/{src}/{id}` that strips
+   the key server-side if this ever runs over the open internet.
+   Implementation: small async route in `web/routes.py` that
+   pipes `httpx` -> `StreamingResponse`. ~50 LOC.
 
-5. **Tests backfill.** No `tests/` directory yet. CLAUDE.md says
+4. **Verify session-6 perf wins in a real browser** (carry-over).
+   Open the live page (full catalogue loaded) and take a DevTools
+   Performance trace before/after. Expected: scroll Rendering
+   time drops sharply (`contain-intrinsic-size`), Scripting on
+   SSE-idle drops to near-quiet (observer + marked-row guards),
+   selecting 100+ rows feels instant (selection Map). Until
+   verified the fixes stay "implemented but unconfirmed".
+
+5. **Re-test browser-cache save reliability** (carry-over).
+   `localStorage.setItem` is wrapped in `requestIdleCallback`,
+   capped at 2 MB, debounced 10 s. Cold-start the page 5 times,
+   confirm `localStorage[qf_groups_cache_v5]` (note: version
+   bumped) is populated after each. If still flaky, drop the
+   save from `htmx:oobAfterSwap` and keep it only on
+   `htmx:afterSettle`.
+
+6. **Nix flake derivation (Phase 9.4).** Convert the
+   `writeShellApplication` shim in `flake.nix` into a proper
+   Python derivation. Then 9.3 / 9.5 / 9.6 fall in line.
+
+7. **README + CLAUDE.md final pass (Phase 9.2).** CLAUDE.md may
+   still have uncommitted local edits; check `git diff CLAUDE.md`
+   first.
+
+8. **Tests backfill.** No `tests/` directory yet. CLAUDE.md says
    `python3 -m pytest tests/ -v` is required before commit, but
-   there's nothing to run. Memory note `[[feedback_defer_tests]]`
+   there's nothing to run. Memory `[[feedback_defer_tests]]`
    captures the intent: tests are deferred and run in a dedicated
-   backfill pass. Pick this up after Nix packaging lands.
+   backfill pass. The new `arr/` package is the most
+   test-deserving: `arr/index.py:build_index` is pure and easy
+   to fixture; `arr/client.py` benefits from an httpx-mock or
+   recorded-response harness.
 
-**Out-of-scope (deferred, lower priority):**
-- Lazy-render torrent rows per group (would halve DOM count again;
-  is a real refactor -- not needed if session-6 wins suffice).
-- Server-side: batch per-tick OOB swaps into one fragment per group
-  per tick (current bottleneck is client-side, not server payload).
+### Known caveats / things-to-be-aware-of
+
+- **Sonarr lacks per-series cutoff.** `arr/index.py:_series_match`
+  uses `episode_file_count >= total_episode_count` as the
+  cutoff-met proxy. Per-episode awareness needs a `/episode`
+  walk plus a different ArrMatch shape -- not in v1.
+- **Title-fallback false matches.** `ARR_TITLE_FALLBACK=true`
+  (default) catches more but can mis-match e.g. "Avatar" (2009)
+  against an unrelated entry of the same name. Setting it to
+  `false` is the escape hatch; cost is that pre-history torrents
+  appear as orphans.
+- **API key visible in browser** for posters. Acceptable on
+  LAN; see priority 3.
+- **CACHE_VERSION bumped 4 -> 5.** Existing cached `#groups`
+  payloads in `localStorage[qf_groups_cache_v4]` are ignored
+  (not deleted -- the key is versioned, so the old key sits idle
+  until the browser garbage-collects).
+- **Two background pollers, one EventBus.** qBit poller every
+  ~1 s, arr poller every ~60 s. Both can publish RESYNC. The
+  SSE handler already coalesces via `last_resync_at`
+  (`RESYNC_COALESCE_INTERVAL = 1.0 s`), so duplicate RESYNCs
+  collapse into one re-render.
+
+### Out-of-scope (deferred, lower priority)
+
+- Lazy-render torrent rows per group (would halve DOM count
+  again; a real refactor -- not needed if the session-6 wins
+  suffice once verified).
+- Server-side: batch per-tick OOB swaps into one fragment per
+  group per tick (current bottleneck is client-side, not server
+  payload).
 - Replace per-row `border-bottom` with parent `gap` (small win,
   larger CSS churn).
-- Move `Reconciler._rebuild` into `asyncio.to_thread` (needs queue
-  refactor; `Subscription.queue` is `asyncio.Queue`, not thread-safe).
+- Move `Reconciler._rebuild` into `asyncio.to_thread` (needs
+  queue refactor; `Subscription.queue` is `asyncio.Queue`, not
+  thread-safe).
+- Tag backfill (push `radarr:<id>` / `sonarr:<id>` to qBit when
+  the *arr indexer establishes a match) -- worth doing once the
+  indexer's match quality has been validated against real data.
+- Per-episode `/episode` walk for true per-series cutoff
+  signalling (vs the current episode-file-count heuristic).
 
-**Always run before commit:** `ruff check && mypy --strict`. (mypy
-not on $PATH in dev shells; use `uv run mypy --strict src/qbit_filter`
-or install via `uv tool install mypy`.) Test suite does not exist
-yet -- see priority 5.
+### Conventions reminder
+
+- **Always run before commit:** `uv run ruff check src/qbit_filter`
+  and `uv run mypy --strict src/qbit_filter`. Both pass on
+  `master` as of `65b403e`.
+- `python3 -m pytest tests/ -v` is required by CLAUDE.md but the
+  `tests/` directory doesn't exist yet -- the test backfill
+  (priority 8) closes this gap.
+- No emojis in any file (pre-commit hook enforces). Use `[OK]`
+  / `[X]` / arrow `->` instead.
 
 ## Architecture (one-liners)
 
 - `qbit/` is the only place that imports `qbittorrent-api`.
   `client.py` carries the IP-auth-bypass workaround (`LoginFailed` ->
   `app_version()`).
+- `arr/` is the only place that imports `httpx`. `client.py` wraps
+  Radarr/Sonarr `/api/v3` endpoints; `sync.py` is the polling
+  generator; `index.py` resolves qBit infohash -> ArrMatch (pure
+  function). `models.py` carries trimmed dataclasses -- only the
+  fields the rest of the app consumes.
 - `state/store.py` is mutated **only** by `state/reconciler.py`;
-  everyone else reads.
+  everyone else reads. `Store.arr` is a read-only handle to the
+  separately-owned `ArrStore` (mutated only by the *arr poller in
+  `app.py`).
+- `state/arr_store.py` carries arr-derived state on a separate
+  store because the qBit reconciler rebuilds `Torrent` snapshots
+  whole every 1 s while the arr poller runs every 60 s -- bolting
+  arr fields onto `Torrent` would race the reconciler.
 - `state/views.py` is pure: snapshot in, filtered groups out.
+  `torrent_matches(t, fs, store=None)` -- the optional `store` arg
+  lets arr-derived facets run; absent store + active arr facet =
+  "no match" (UI doesn't leak rows from a configured-but-loading
+  arr store).
 - `Subscription` (one per SSE client) owns a `FilterState` + bounded
   4096-slot queue.
 - Action endpoints call `qbit/actions.py` and return 204; the
@@ -83,8 +197,16 @@ yet -- see priority 5.
   per click. Per-row inline menus were removed in session 4 (~1310
   inline kebabs / ~6 k hx-* attributes -- dominant scroll-jank cost).
 - `cleanup/` houses the rule engine (registry + rule presets) over
-  the store snapshot. Operator Console restyle (session 6) replaced
-  Beer CSS with hand-rolled `tokens.css` + `custom.css`.
+  the store snapshot. *arr-aware rules (`ArrCutoffMetColdRule`,
+  `ArrUnmonitoredCompletedRule`) consult `store.arr` and no-op when
+  it's `None`, so they coexist with qBit-only rules unchanged.
+  Operator Console restyle (session 6) replaced Beer CSS with
+  hand-rolled `tokens.css` + `custom.css`.
+- **Background tasks**: `app.py:_lifespan` spawns `_poller` (qBit,
+  always) and `_arr_poller` (only when at least one arr URL is
+  configured). Both publish to the same `EventBus`; SSE RESYNC
+  coalescing in `web/routes.py:_render_event_batch_iter` already
+  de-dupes the cross-poller fan-out.
 
 ## Module inventory
 
@@ -92,15 +214,18 @@ yet -- see priority 5.
 src/qbit_filter/
   __init__.py  __main__.py  app.py  config.py  domain.py  py.typed
   qbit/        client.py  sync.py  actions.py
+  arr/         client.py  sync.py  index.py  models.py    [phase 11]
   grouping/    parser.py  grouper.py  quality.py
   state/       store.py  events.py  reconciler.py  views.py
-               subscribers.py  viewport.py
-  cleanup/     registry.py  rules.py
+               subscribers.py  viewport.py  arr_store.py  [phase 11]
+  cleanup/     registry.py  rules.py   (4 qBit-only + 2 arr-aware
+                                        + 4 not-yet-implemented)
   web/         routes.py  render.py  filter_parse.py
                templates/  base.html  index.html  _sidebar.html
                            _filters.html  _active_filters.html
                            _group.html  _torrent.html  _empty.html
                            _rule_bar.html  _selection_bar.html
+                           _compare_strip.html
                static/     tokens.css  custom.css  favicon.svg
                            keys.js  livereload.js
 scripts/       capture_fixtures.py  screenshot.py
