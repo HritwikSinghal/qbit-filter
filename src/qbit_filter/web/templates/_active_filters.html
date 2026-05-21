@@ -1,4 +1,13 @@
 <div class="active-filters-strip">
+  {# Top-level select-all checkbox -- toggles selection of every visible
+     torrent row in #groups, skipping keepers when a rule preview is
+     active. The label updates to "Clear selection" as soon as anything
+     is selected so the user has a single, obvious affordance for both
+     directions. State is owned by keys.js (see ``master-select``). #}
+  <label class="master-select" title="Select / clear all visible torrents">
+    <input type="checkbox" id="master-select" aria-label="Select all visible torrents">
+    <span id="master-select-label">Select all</span>
+  </label>
   <span class="result-count">
     Showing <strong>{{ visible_count if visible_count is defined else visible_groups|length }}</strong> of <strong>{{ total_groups }}</strong> groups
   </span>

@@ -41,7 +41,7 @@ CACHE_COOKIE = "qf_has_cache"
 # (e.g. new field on every row, new wrapping element, renamed selector).
 # Exposed to the client as ``window.QF_CACHE_VERSION`` so cached HTML from
 # a previous version is discarded on next page load.
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 SSE_PING_INTERVAL = 15.0  # seconds between keep-alive comments
 # Minimum gap between RESYNC payloads to one client. Each RESYNC re-renders
 # every visible group (~900KB blob), so back-to-back RESYNCs visibly stutter
@@ -126,10 +126,17 @@ def _oob_payload(request: Request, store: Store, sub: Subscription) -> str:
     )
 
 
-def _render_rule_bar(request: Request, store: Store, fs: FilterState) -> str:
+def _render_rule_bar(
+    request: Request,
+    store: Store,
+    fs: FilterState,
+    active_slug: str = "",
+) -> str:
     """Render the rule selector chips, intersecting each rule's candidates
     with the active filter so the count reflects what clicking the chip
-    will actually surface."""
+    will actually surface. ``active_slug`` marks the currently-previewed
+    rule (aria-pressed) so the chip stays visually pressed across SSE
+    re-renders of the rule bar."""
     templates: Jinja2Templates = request.app.state.templates
     rows: list[dict[str, Any]] = []
     for r in RULES:
@@ -152,9 +159,62 @@ def _render_rule_bar(request: Request, store: Store, fs: FilterState) -> str:
                 "description": r.description,
                 "implemented": impl,
                 "match_count": count,
+                "active": r.slug == active_slug,
             }
         )
-    return templates.get_template("_rule_bar.html").render(request=request, rules=rows)
+    return templates.get_template("_rule_bar.html").render(
+        request=request, rules=rows, active_slug=active_slug
+    )
+
+
+def _rule_preview_context(
+    store: Store, sub: Subscription
+) -> tuple[
+    dict[GroupKey, dict[str, str]],
+    dict[GroupKey, str],
+    dict[GroupKey, dict[str, tuple[Any, ...]]],
+    dict[GroupKey, dict[str, str]],
+    list[GroupKey],
+]:
+    """Compute rule preview context for the subscription's active rule.
+
+    Returns ``(marks_by_group, keepers_by_group, factors_by_group,
+    severity_by_group, ordered_group_keys)``. When ``sub.active_rule_slug``
+    is empty or the rule no longer exists, returns empty dicts and an empty
+    list. ``ordered_group_keys`` is the title-sorted list of groups the
+    rule matched -- used by ``/rules/{slug}/preview`` to scope the visible
+    set to just the matching groups, but ignored by SSE renders that need
+    rule context overlaid on the full visible set.
+    """
+    slug = sub.active_rule_slug
+    if not slug:
+        return {}, {}, {}, {}, []
+    rule = BY_SLUG.get(slug)
+    if rule is None or not is_implemented(rule):
+        return {}, {}, {}, {}, []
+    fs = sub.filter_state
+    by_group: dict[GroupKey, dict[str, str]] = {}
+    keepers: dict[GroupKey, str] = {}
+    factors_by_group: dict[GroupKey, dict[str, tuple[Any, ...]]] = {}
+    severity_by_group: dict[GroupKey, dict[str, str]] = {}
+    for c in rule.candidates(store):
+        if c.group_key not in store.groups:
+            continue
+        if not group_matches(store, fs, c.group_key):
+            continue
+        t = store.torrents.get(c.torrent_hash)
+        if t is None or not torrent_matches(t, fs, store):
+            continue
+        by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.reason
+        factors_by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.factors
+        if c.severity != "normal":
+            severity_by_group.setdefault(c.group_key, {})[
+                c.torrent_hash
+            ] = c.severity
+        if c.keeper_hash and c.group_key not in keepers:
+            keepers[c.group_key] = c.keeper_hash
+    ordered = sorted(by_group.keys(), key=lambda k: store.groups[k].title.lower())
+    return by_group, keepers, factors_by_group, severity_by_group, ordered
 
 
 def register_routes(app: FastAPI) -> None:
@@ -551,13 +611,23 @@ def register_routes(app: FastAPI) -> None:
         qf_sid: str | None = Cookie(default=None),
     ) -> HTMLResponse:
         """Run one rule against the live store and render only the matching
-        groups, with the candidate rows pre-checked and reason chips inline.
+        groups, with the candidate rows highlighted and reason chips inline.
+
+        Clicking the currently-active rule chip clears the preview (toggle).
+        The chosen slug is persisted on the subscription so SSE-driven
+        re-renders (RESYNC + per-row TORRENT_CHANGED) keep the compare-strip
+        layout instead of flattening back to the plain row stack.
 
         Intersects rule matches with the subscription's active
         :class:`FilterState` so that filtering down to e.g. category=radarr
         and then clicking a rule shows only candidates within that view --
         otherwise the selection footer would gain hashes from groups the
         user can't see, which is confusing and dangerous on bulk delete.
+
+        The response also returns an OOB ``data-just-activated`` attribute
+        on the staging marker so the client can do its one-shot
+        bulk-auto-select on the freshly-rendered flagged rows without
+        re-checking them on every subsequent SSE re-render.
         """
         store: Store = request.app.state.store
         rule = BY_SLUG.get(slug)
@@ -566,36 +636,33 @@ def register_routes(app: FastAPI) -> None:
                 status_code=404, detail=f"unknown or unimplemented rule: {slug}"
             )
         sub, _ = _get_or_create_subscription(request, None, qf_sid)
+
+        toggled_off = sub.active_rule_slug == slug
+        if toggled_off:
+            sub.active_rule_slug = ""
+        else:
+            sub.active_rule_slug = slug
+
         fs = sub.filter_state
-        cands = rule.candidates(store)
-        by_group: dict[GroupKey, dict[str, str]] = {}
-        keepers: dict[GroupKey, str] = {}
-        factors_by_group: dict[GroupKey, dict[str, tuple[Any, ...]]] = {}
-        severity_by_group: dict[GroupKey, dict[str, str]] = {}
-        for c in cands:
-            if c.group_key not in store.groups:
-                continue
-            if not group_matches(store, fs, c.group_key):
-                continue
-            t = store.torrents.get(c.torrent_hash)
-            # Honour the user's torrent-level filter chips: a category filter
-            # on ``radarr`` must not surface ``sonarr`` candidates even when
-            # their group happens to pass (e.g. mixed-content group). Without
-            # this, bulk-confirm would queue hashes the user cannot see.
-            if t is None or not torrent_matches(t, fs, store):
-                continue
-            by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.reason
-            factors_by_group.setdefault(c.group_key, {})[c.torrent_hash] = c.factors
-            if c.severity != "normal":
-                severity_by_group.setdefault(c.group_key, {})[
-                    c.torrent_hash
-                ] = c.severity
-            # Record the keeper once per group. All candidates in a single
-            # group share the same keeper (rules pick one per group).
-            if c.keeper_hash and c.group_key not in keepers:
-                keepers[c.group_key] = c.keeper_hash
-        visible = [store.groups[k] for k in by_group]
-        visible.sort(key=lambda g: g.title.lower())
+        rule_bar_html = _render_rule_bar(request, store, fs, sub.active_rule_slug)
+        rule_bar_oob = (
+            f'<div id="rule-bar-slot" hx-swap-oob="innerHTML">{rule_bar_html}</div>'
+        )
+
+        if toggled_off:
+            # Clearing: show the standard unfiltered view (no marks). The
+            # client-side `pendingRuleActivation` marker is NOT emitted so
+            # afterSwap won't bulk-select anything.
+            visible_groups = apply_filters(store, fs)
+            html = render.render_groups_payload(
+                request, store, fs, visible=visible_groups
+            )
+            return HTMLResponse(html + rule_bar_oob)
+
+        by_group, keepers, factors_by_group, severity_by_group, ordered = (
+            _rule_preview_context(store, sub)
+        )
+        visible = [store.groups[k] for k in ordered]
         html = render.render_groups_payload(
             request,
             store,
@@ -605,8 +672,18 @@ def register_routes(app: FastAPI) -> None:
             rule_keepers_by_group=keepers,
             rule_factors_by_group=factors_by_group,
             rule_severity_by_group=severity_by_group,
+            pre_check_flagged=True,
         )
-        return HTMLResponse(html)
+        # Emit a one-shot marker INSIDE the #groups innerHTML swap so the
+        # client knows THIS swap was triggered by a fresh rule activation
+        # and should bulk-add flagged rows to the selection Map. Subsequent
+        # SSE re-renders won't include the marker, so user edits to the
+        # selection stick. Has to live inside the swap content because
+        # ``hx-swap-oob`` targeting a non-existent id silently no-ops.
+        activation_marker = (
+            f'<span id="qf-rule-activation" data-slug="{slug}" hidden></span>'
+        )
+        return HTMLResponse(activation_marker + html + rule_bar_oob)
 
     # ---------- Viewport -----------------------------------------------------
 
@@ -649,6 +726,72 @@ def register_routes(app: FastAPI) -> None:
     async def remove(torrent_hash: str, purge: int = 0) -> Response:
         await qbit_actions.delete(_client(), torrent_hash, purge=bool(purge))
         return Response(status_code=204)
+
+    # ---------- arr history dialog ------------------------------------------
+
+    @app.get("/arr/history/{source}/{entity_id}", response_class=HTMLResponse)
+    async def arr_history(
+        request: Request, source: str, entity_id: int
+    ) -> HTMLResponse:
+        """Return the rendered history dialog body for one movie / series.
+
+        Used by the inline history badge on torrent rows -- clicking it
+        ``hx-get``s this endpoint into ``#arr-history-dialog``. The endpoint
+        is intentionally synchronous-style (no SSE): the dialog is a
+        snapshot, not a live view, so a 200ms one-shot is fine.
+
+        404 when ``source`` is unknown or arr isn't configured. Empty
+        history (no events) still returns 200 with an "empty" body so the
+        dialog opens with context instead of failing silently.
+        """
+        from qbit_filter.arr import client as arr_client
+
+        if source not in ("radarr", "sonarr"):
+            raise HTTPException(status_code=404, detail="unknown arr source")
+        settings = request.app.state.settings
+        if source == "radarr":
+            url, api_key = settings.radarr_url, settings.radarr_api_key
+        else:
+            url, api_key = settings.sonarr_url, settings.sonarr_api_key
+        if not (url and api_key):
+            raise HTTPException(
+                status_code=404, detail=f"{source} is not configured"
+            )
+        # Try to resolve a human-readable title from the live arr store.
+        store: Store = request.app.state.store
+        entity_title = ""
+        if store.arr is not None:
+            if source == "radarr":
+                movie = store.arr.movies_by_id.get(entity_id)
+                if movie is not None:
+                    entity_title = (
+                        f"{movie.title}" + (f" ({movie.year})" if movie.year else "")
+                    )
+            else:
+                series = store.arr.series_by_id.get(entity_id)
+                if series is not None:
+                    entity_title = series.title
+        async with arr_client.make_client() as client:
+            try:
+                events = await arr_client.fetch_history_for_entity(
+                    client,
+                    url,
+                    api_key,
+                    source=source,
+                    entity_id=entity_id,
+                )
+            except arr_client.ArrUnavailable as exc:
+                logger.warning("arr history dialog fetch failed: %s", exc)
+                events = []
+        return HTMLResponse(
+            render.render_arr_history_dialog(
+                request,
+                source=source,
+                entity_id=entity_id,
+                entity_title=entity_title,
+                events=events,
+            )
+        )
 
 
 def _esc_for_sse(html: str) -> str:
@@ -725,12 +868,21 @@ def _emit_resync_batches(
     visible = apply_filters(store, fs)
     total = len(visible)
 
+    # Rule-preview context (active across SSE re-renders so the compare-strip
+    # layout persists). Empty dicts when no rule is active -- the templates
+    # then fall through to the flat row stack as before.
+    rule_marks, rule_keepers, rule_factors, rule_severity, _ = (
+        _rule_preview_context(store, sub)
+    )
+
     active_html = render.render_active_filters(request, store, fs, visible=visible)
     facets_html = render.render_filter_facets(request, store, fs)
+    rule_bar_html = _render_rule_bar(request, store, fs, sub.active_rule_slug)
     chrome_oobs = (
         f'<div id="active-filters" hx-swap-oob="outerHTML" '
         f'aria-live="polite">{active_html}</div>'
         f'<div id="filter-facets" hx-swap-oob="outerHTML">{facets_html}</div>'
+        f'<div id="rule-bar-slot" hx-swap-oob="innerHTML">{rule_bar_html}</div>'
     )
 
     if total == 0:
@@ -774,6 +926,10 @@ def _emit_resync_batches(
                 g,
                 torrents_for_group(store, g.key, fs),
                 store=store,
+                rule_marks=rule_marks.get(g.key, {}),
+                rule_keeper=rule_keepers.get(g.key, ""),
+                rule_factors=rule_factors.get(g.key, {}),
+                rule_severity=rule_severity.get(g.key, {}),
             )
             for g in visible[idx:end]
         )
@@ -839,12 +995,25 @@ def _render_delta_events(
     """
     fs = sub.filter_state
 
+    # Rule preview context. When a rule is active, any row update inside a
+    # rule-flagged group is escalated to a whole-card swap so the
+    # compare-strip structure is preserved (a per-row outerHTML targeting
+    # ``#torrent-{hash}`` would either land inside the compare-strip --
+    # corrupting its layout -- or silently no-op for the keeper row, which
+    # has no per-row id).
+    rule_marks, rule_keepers, rule_factors, rule_severity, _ = (
+        _rule_preview_context(store, sub)
+    )
+
     # Dedupe by target. dicts keep insertion order, which we use as render order.
     added_groups: dict[GroupKey, None] = {}
     removed_groups: dict[GroupKey, None] = {}
     added_torrents: dict[str, GroupKey] = {}
     changed_torrents: dict[str, GroupKey] = {}
     removed_torrents: dict[str, GroupKey] = {}
+    # Rule-preview escalations: re-render the whole card for these group
+    # keys at the end of this delta batch.
+    rule_card_rerenders: dict[GroupKey, None] = {}
 
     for e in events:
         if e.kind == EventKind.GROUP_ADDED and e.group_key:
@@ -858,8 +1027,23 @@ def _render_delta_events(
         elif e.kind == EventKind.TORRENT_REMOVED and e.torrent_hash and e.group_key:
             removed_torrents[e.torrent_hash] = e.group_key
 
+    # Escalate any row update inside a rule-flagged group to a whole-card
+    # re-render so the compare-strip layout survives the swap. Strips the
+    # row from the per-row maps because the card render includes them.
+    if rule_marks:
+        rule_groups = set(rule_marks.keys())
+        for h in [h for h, gk in changed_torrents.items() if gk in rule_groups]:
+            rule_card_rerenders[changed_torrents[h]] = None
+            del changed_torrents[h]
+        for h in [h for h, gk in added_torrents.items() if gk in rule_groups]:
+            rule_card_rerenders[added_torrents[h]] = None
+            del added_torrents[h]
+        for h in [h for h, gk in removed_torrents.items() if gk in rule_groups]:
+            rule_card_rerenders[removed_torrents[h]] = None
+            del removed_torrents[h]
+
     # A whole-group render already includes its torrent rows.
-    shadowed_groups = set(added_groups) | set(removed_groups)
+    shadowed_groups = set(added_groups) | set(removed_groups) | set(rule_card_rerenders)
     for h in [h for h, gk in changed_torrents.items() if gk in shadowed_groups]:
         del changed_torrents[h]
     for h in [h for h, gk in added_torrents.items() if gk in shadowed_groups]:
@@ -915,6 +1099,32 @@ def _render_delta_events(
 
     parts: list[str] = []
 
+    # Rule-preview card re-renders: swap the whole card outerHTML so the
+    # compare-strip structure stays consistent. Emitted before per-row
+    # OOBs in case a later op references the same card.
+    for gk in rule_card_rerenders:
+        if not _visible(gk):
+            continue
+        group = store.groups.get(gk)
+        if group is None:
+            continue
+        slug = gk.slug()
+        card_html = render.render_group(
+            request,
+            group,
+            _torrents(gk),
+            store=store,
+            rule_marks=rule_marks.get(gk, {}),
+            rule_keeper=rule_keepers.get(gk, ""),
+            rule_factors=rule_factors.get(gk, {}),
+            rule_severity=rule_severity.get(gk, {}),
+        )
+        parts.append(card_html.replace(
+            f'id="group-{slug}"',
+            f'id="group-{slug}" hx-swap-oob="outerHTML"',
+            1,
+        ))
+
     for gk in removed_groups:
         parts.append(f'<div id="group-{gk.slug()}" hx-swap-oob="delete"></div>')
 
@@ -929,7 +1139,16 @@ def _render_delta_events(
         if group is None:
             continue
         torrents = _torrents(gk)
-        card_html = render.render_group(request, group, torrents, store=store)
+        card_html = render.render_group(
+            request,
+            group,
+            torrents,
+            store=store,
+            rule_marks=rule_marks.get(gk, {}),
+            rule_keeper=rule_keepers.get(gk, ""),
+            rule_factors=rule_factors.get(gk, {}),
+            rule_severity=rule_severity.get(gk, {}),
+        )
         # New cards go into #groups via afterbegin; existing card lookups
         # using outerHTML would silently no-op for a brand-new id. Adding
         # qf-enter triggers the entrance animation -- only freshly inserted
@@ -963,6 +1182,8 @@ def _render_delta_events(
             )
             parts.append(_count_oob(gk))
             continue
+        # Non-rule-flagged groups: render with empty rule context. (Rule-
+        # flagged groups were promoted to whole-card re-renders above.)
         row = render.render_torrent(request, t, store=store)
         parts.append(row.replace(
             f'id="torrent-{t.hash}"',

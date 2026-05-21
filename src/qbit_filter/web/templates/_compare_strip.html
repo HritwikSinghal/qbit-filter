@@ -2,36 +2,52 @@
    Rendered when a rule preview is active and the group has both a keeper
    and at least one flagged sibling.
 
+   Each row uses a vertically-stacked layout inside the narrow compare
+   column so the torrent name, quality badge, reason factors, and meta
+   never get truncated:
+
+       [check] [q-badge] [name -- fully expanded]
+                         [meta + factors -- wraps]
+
    Variables:
      keeper          Torrent that the rule recommends keeping
      flagged         list[Torrent] -- candidates the rule wants to remove
      rule_factors    dict[hash, tuple[ReasonFactor]] -- inline pills per row
      rule_marks      dict[hash, reason] -- prose fallback for tooltip
      rule_severity   dict[hash, str] -- row-level severity ("warning")
+     _pre_check_flagged  bool -- pre-check flagged checkboxes (one-shot
+                                 preview render only). Set by _group.html.
 #}
+{% set _pre_check_flagged = _pre_check_flagged | default(false) %}
 <div class="compare-strip">
   <div class="compare-col keeper">
     <div class="compare-col-head">
       <span class="keeper-badge" title="Rule's recommended keeper">K</span>
       <span>KEEPER</span>
     </div>
-    <div class="torrent-row keeper-row tier-{{ keeper.quality.tier.value.rstrip('p').lower() if keeper.quality.tier.value != 'unknown' else 'unknown' }}"
+    {% set _keeper_tier = keeper.quality.tier.value %}
+    {% set _keeper_tier_class = 'tier-unknown' if _keeper_tier == 'unknown' else 'tier-' + _keeper_tier.rstrip('p').lower() %}
+    <div class="torrent-row compare-row keeper-row {{ _keeper_tier_class }}"
          data-hash="{{ keeper.hash }}"
          data-state="{{ keeper.state.value }}"
-         data-tier="{{ keeper.quality.tier.value }}"
+         data-tier="{{ _keeper_tier }}"
          data-marked="false"
          data-keeper="true">
-      <input type="checkbox" class="row-check" aria-label="Select {{ keeper.name }}"
-             data-hash="{{ keeper.hash }}">
-      <span class="q-badge tier-{{ keeper.quality.tier.value.rstrip('p').lower() if keeper.quality.tier.value != 'unknown' else 'unknown' }}">
-        {{ keeper.quality.tier.value }}{% if keeper.quality.source %} {{ keeper.quality.source }}{% endif %}
-      </span>
-      <span class="name" title="{{ keeper.name }}">{{ keeper.name }}</span>
-      <span class="meta">
-        <span data-bytes="{{ keeper.size }}">{{ (keeper.size / 1073741824) | round(2) }} GB</span>
-        <span>R {{ '%.2f' | format(keeper.ratio) }}</span>
-        {% if keeper.added_on %}<span>{{ keeper.added_on | fmt_date }}</span>{% endif %}
-      </span>
+      <div class="compare-row-head">
+        <input type="checkbox" class="row-check" aria-label="Select {{ keeper.name }}"
+               data-hash="{{ keeper.hash }}">
+        <span class="q-badge {{ _keeper_tier_class }}">
+          {{ _keeper_tier }}{% if keeper.quality.source %} {{ keeper.quality.source }}{% endif %}
+        </span>
+        <span class="name" title="{{ keeper.name }}">{{ keeper.name }}</span>
+      </div>
+      <div class="compare-row-meta">
+        <span class="meta">
+          <span data-bytes="{{ keeper.size }}">{{ (keeper.size / 1073741824) | round(2) }} GB</span>
+          <span>R {{ '%.2f' | format(keeper.ratio) }}</span>
+          {% if keeper.added_on %}<span>{{ keeper.added_on | fmt_date }}</span>{% endif %}
+        </span>
+      </div>
     </div>
   </div>
   <div class="compare-col flagged">
@@ -45,7 +61,7 @@
       {% set _tier = t.quality.tier.value %}
       {% set _tier_class = 'tier-unknown' if _tier == 'unknown' else 'tier-' + _tier.rstrip('p').lower() %}
       <div id="torrent-{{ t.hash }}"
-           class="torrent-row flagged-row {{ _tier_class }}"
+           class="torrent-row compare-row flagged-row {{ _tier_class }}"
            data-hash="{{ t.hash }}"
            data-state="{{ t.state.value }}"
            data-tier="{{ _tier }}"
@@ -53,32 +69,36 @@
            {% if _severity %}data-severity="{{ _severity }}"{% endif %}
            style="--idx: {{ loop.index0 if loop.index0 < 12 else 12 }};"
            title="{{ reason or '' }}">
-        <input type="checkbox"
-               class="row-check"
-               aria-label="Select {{ t.name }}"
-               data-hash="{{ t.hash }}"
-               checked>
-        <span class="q-badge {{ _tier_class }}">
-          {{ _tier }}{% if t.quality.source %} {{ t.quality.source }}{% endif %}
-        </span>
-        <span class="name" title="{{ t.name }}">{{ t.name }}</span>
-        <span class="meta">
-          <span data-bytes="{{ t.size }}">{{ (t.size / 1073741824) | round(2) }} GB</span>
-          <span>R {{ '%.2f' | format(t.ratio) }}</span>
-          {% if t.added_on %}<span>{{ t.added_on | fmt_date }}</span>{% endif %}
-        </span>
-        {% if factors %}
-          <span class="reason-factors">
-            {% for f in factors %}
-              <span class="factor {{ f.kind }}" title="{{ f.label }}: {{ f.value }}">
-                <span class="factor-label">{{ f.label }}</span>
-                <span class="factor-value">{{ f.value }}</span>
-              </span>
-            {% endfor %}
+        <div class="compare-row-head">
+          <input type="checkbox"
+                 class="row-check"
+                 aria-label="Select {{ t.name }}"
+                 data-hash="{{ t.hash }}"
+                 {% if _pre_check_flagged %}checked{% endif %}>
+          <span class="q-badge {{ _tier_class }}">
+            {{ _tier }}{% if t.quality.source %} {{ t.quality.source }}{% endif %}
           </span>
-        {% elif reason %}
-          <span class="reason-chip">{{ reason }}</span>
-        {% endif %}
+          <span class="name" title="{{ t.name }}">{{ t.name }}</span>
+        </div>
+        <div class="compare-row-meta">
+          <span class="meta">
+            <span data-bytes="{{ t.size }}">{{ (t.size / 1073741824) | round(2) }} GB</span>
+            <span>R {{ '%.2f' | format(t.ratio) }}</span>
+            {% if t.added_on %}<span>{{ t.added_on | fmt_date }}</span>{% endif %}
+          </span>
+          {% if factors %}
+            <span class="reason-factors">
+              {% for f in factors %}
+                <span class="factor {{ f.kind }}" title="{{ f.label }}: {{ f.value }}">
+                  <span class="factor-label">{{ f.label }}</span>
+                  <span class="factor-value">{{ f.value }}</span>
+                </span>
+              {% endfor %}
+            </span>
+          {% elif reason %}
+            <span class="reason-chip">{{ reason }}</span>
+          {% endif %}
+        </div>
       </div>
     {% endfor %}
   </div>

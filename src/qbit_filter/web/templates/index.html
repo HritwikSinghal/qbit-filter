@@ -76,6 +76,19 @@
     {% include "_selection_bar.html" %}
     {% include "_confirm_delete.html" %}
     {% include "_kbd_cheatsheet.html" %}
+
+    {# arr history dialog -- populated on demand by the per-row badge.
+       Modal scaffolding lives here so the dialog can be closed by
+       toggling data-active without re-fetching. Click-outside-card
+       closes it. #}
+    <div id="arr-history-dialog"
+         class="confirm-modal arr-history-modal"
+         data-active="false"
+         role="dialog"
+         aria-modal="true"
+         aria-hidden="true"
+         aria-labelledby="arr-history-title"
+         onclick="if(event.target===this)this.setAttribute('data-active','false')"></div>
   </main>
 </div>
 {% endblock %}

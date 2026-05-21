@@ -61,3 +61,4 @@ result-*
 
 # Playwright screenshots (visual review artefacts, not source)
 screenshots/
+.mcp.json

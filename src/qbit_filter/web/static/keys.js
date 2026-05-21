@@ -393,12 +393,63 @@
       for (const b of selection.values()) bytes += b;
       sizeEl.textContent = (bytes / 1073741824).toFixed(2);
     }
+    repaintMasterSelect();
+  }
+
+  /* Master select-all checkbox in the active-filters strip. Reflects the
+     selection state for visible non-keeper rows; clicking it either selects
+     every visible torrent or clears the selection entirely. */
+  function repaintMasterSelect() {
+    const cb = document.getElementById('master-select');
+    const lbl = document.getElementById('master-select-label');
+    if (!cb || !(cb instanceof HTMLInputElement)) return;
+    const rows = visibleRows().filter(
+      (r) => r.getAttribute('data-keeper') !== 'true',
+    );
+    const total = rows.length;
+    let selected = 0;
+    for (const row of rows) {
+      const h = row.getAttribute('data-hash');
+      if (h && selection.has(h)) selected++;
+    }
+    if (selected === 0) {
+      cb.checked = false;
+      cb.indeterminate = false;
+      if (lbl) lbl.textContent = 'Select all';
+    } else if (selected === total && total > 0) {
+      cb.checked = true;
+      cb.indeterminate = false;
+      if (lbl) lbl.textContent = 'Clear selection (' + selected + ')';
+    } else {
+      cb.checked = false;
+      cb.indeterminate = true;
+      if (lbl) lbl.textContent = 'Clear selection (' + selected + ')';
+    }
   }
 
   /* Event delegation works for SSE-injected rows too. */
   document.body.addEventListener('change', (e) => {
     const t = e.target;
-    if (!(t instanceof HTMLInputElement) || !t.classList.contains('row-check')) return;
+    if (!(t instanceof HTMLInputElement)) return;
+
+    /* Master select-all toggle. Drive the action from selection.size, not
+       from the post-click `t.checked`: when the checkbox is in the
+       indeterminate (partial) state the browser flips checked to true on
+       click, which would silently turn a user-intended "Clear selection
+       (N)" press into a select-all. The label already reflects intent --
+       anything selected -> "Clear selection", nothing selected -> "Select
+       all" -- so trust that. repaintMasterSelect() restores the checkbox
+       visual state after the action. */
+    if (t.id === 'master-select') {
+      if (selection.size > 0) {
+        clearSelection();
+      } else {
+        selectAllVisible();
+      }
+      return;
+    }
+
+    if (!t.classList.contains('row-check')) return;
     const row = t.closest('.torrent-row');
     const h = row && row.getAttribute('data-hash');
     if (!h) return;
@@ -650,14 +701,40 @@
 
   /* Range selection -- shift-click / Shift+X. With `forceChecked = true`
      all in-range rows are set TRUE (Finder / Gmail semantics: shift-click
-     extends the selection rather than toggling). */
+     extends the selection rather than toggling).
+
+     Scope: when both the anchor and the target live inside the same
+     compare-strip column (e.g., both in the FLAGGED column of a rule
+     preview), restrict the walked rows to that column so the range
+     doesn't cross the keeper/flagged divide and accidentally toggle the
+     keeper row. Otherwise fall back to the document-order visible row
+     list. */
   function rangeSelectTo(toRow, forceChecked) {
     if (!toRow) return;
-    const rows = visibleRows();
     if (!rangeAnchorHash) {
       rangeAnchorHash = toRow.getAttribute('data-hash');
       toggleRowSelection(toRow);
       return;
+    }
+    const anchorRow = document.querySelector(
+      '.torrent-row[data-hash="' + CSS.escape(rangeAnchorHash) + '"]',
+    );
+    let rows = visibleRows();
+    if (anchorRow) {
+      const anchorCol = anchorRow.closest('.compare-col');
+      const targetCol = toRow.closest('.compare-col');
+      if (anchorCol && anchorCol === targetCol) {
+        rows = Array.from(anchorCol.querySelectorAll('.torrent-row'));
+      } else if (anchorCol || targetCol) {
+        /* Anchor and target are in different compare columns (or only one
+           is). Refuse to bridge them -- the user shift-clicked across
+           the keeper/flagged divide, which is almost always accidental.
+           Reset the anchor to the new target so the next shift-click
+           starts a fresh range inside the new column. */
+        toggleRowSelection(toRow);
+        rangeAnchorHash = toRow.getAttribute('data-hash');
+        return;
+      }
     }
     let from = -1, to = -1;
     for (let i = 0; i < rows.length; i++) {
@@ -669,6 +746,11 @@
     if (from < 0 || to < 0) { toggleRowSelection(toRow); return; }
     const [lo, hi] = from < to ? [from, to] : [to, from];
     for (let i = lo; i <= hi; i++) {
+      /* Skip keeper rows even inside a same-column range -- keepers live
+         in the keeper column so this only kicks in when the user
+         shift-clicks within the keeper column itself. The rule's
+         recommended keeper should never be auto-selected. */
+      if (rows[i].getAttribute('data-keeper') === 'true') continue;
       const cb = rows[i].querySelector('.row-check');
       if (cb instanceof HTMLInputElement && cb.checked !== forceChecked) {
         cb.checked = forceChecked;
@@ -682,6 +764,10 @@
     const rows = visibleRows();
     let touched = 0;
     rows.forEach((row) => {
+      /* Never auto-select the rule's recommended keeper -- doing so
+         defeats the point of the rule recommendation. The user can still
+         shift-click into the keeper column to manually include it. */
+      if (row.getAttribute('data-keeper') === 'true') return;
       const cb = row.querySelector('.row-check');
       if (cb instanceof HTMLInputElement && !cb.checked) {
         cb.checked = true;
@@ -869,6 +955,12 @@
     }
 
     if (e.key === 'Escape') {
+      const histDialog = document.getElementById('arr-history-dialog');
+      if (histDialog && histDialog.dataset.active === 'true') {
+        e.preventDefault();
+        histDialog.dataset.active = 'false';
+        return;
+      }
       if (confirmOpen()) { e.preventDefault(); closeConfirmDialog(); return; }
       const cs = document.getElementById('kbd-cheatsheet');
       if (cs && cs.dataset.active === 'true') { toggleCheatsheet(false); return; }
@@ -977,18 +1069,42 @@
     if (!target) return;
 
     if (target.id === 'groups') {
-      /* On a full #groups replacement, auto-add rule-flagged rows to
-         selection (rule-cleanup UX) and restore focused-row outline by
-         hash. Rule-bar swaps don't mutate row marks, so they don't need
-         this pass -- the old `|| target.id === 'rule-bar-slot'` branch
-         scoped the scan to `document` and walked all 1310 rows for
-         nothing. */
-      target.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {
-        const h = row.getAttribute('data-hash');
-        if (h) selection.set(h, rowBytes(row));
-        const cb = row.querySelector('.row-check');
-        if (cb instanceof HTMLInputElement) cb.checked = true;
-      });
+      /* Invalidate the visible-row cache BEFORE repaint so the master
+         select-all checkbox reflects the freshly-rendered row set. */
+      invalidateVisibleCache();
+
+      /* Rule-cleanup UX: only auto-add flagged rows to selection on the
+         FIRST swap that follows a rule-chip click. Subsequent swaps
+         (SSE RESYNC, per-card re-render) carry the same data-marked
+         highlight but must NOT re-check rows the user explicitly
+         unchecked -- the in-memory selection Map is authoritative.
+         The /rules/{slug}/preview response emits a one-shot
+         <meta id="qf-rule-activation"> OOB so we know this swap is
+         the activation; we consume the flag here.
+
+         For non-activation swaps we still pre-check rows that are
+         in the selection Map (covers the cached-snapshot paint case
+         where the rows already exist with data-marked from a prior
+         preview that the user partially unchecked). */
+      const activation = document.getElementById('qf-rule-activation');
+      if (activation) {
+        target.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {
+          if (row.getAttribute('data-keeper') === 'true') return;
+          const h = row.getAttribute('data-hash');
+          if (h) selection.set(h, rowBytes(row));
+          const cb = row.querySelector('.row-check');
+          if (cb instanceof HTMLInputElement) cb.checked = true;
+        });
+        activation.remove();
+      } else {
+        /* Re-apply existing selection state to freshly rendered rows. */
+        target.querySelectorAll('.torrent-row').forEach((row) => {
+          const h = row.getAttribute('data-hash');
+          if (!h || !selection.has(h)) return;
+          const cb = row.querySelector('.row-check');
+          if (cb instanceof HTMLInputElement && !cb.checked) cb.checked = true;
+        });
+      }
       repaintSelectionFooter();
 
       if (focusedHash) {

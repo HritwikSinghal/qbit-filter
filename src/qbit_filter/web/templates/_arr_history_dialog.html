@@ -1,0 +1,54 @@
+{# arr history dialog body. Loaded via htmx into #arr-history-dialog when the
+   user clicks a per-row history badge. The wrapper div in index.html owns
+   the modal scaffolding; this template only emits the inner contents so
+   the same shell can be cleared on close without rebuilding from scratch.
+
+   Variables:
+     source        "radarr" | "sonarr"
+     entity_id     int
+     entity_title  human title (when known)
+     events        list[dict] with date / event_type / source_title /
+                   release_group / indexer / quality
+#}
+<div class="arr-history-card" role="document">
+  <header class="arr-history-head">
+    <h2 id="arr-history-title">
+      {{ source | capitalize }} history
+      {% if entity_title %}- <span class="arr-history-entity">{{ entity_title }}</span>{% endif %}
+    </h2>
+    <button type="button"
+            class="btn arr-history-close"
+            aria-label="Close history"
+            onclick="document.getElementById('arr-history-dialog').setAttribute('data-active','false')">x</button>
+  </header>
+  <div class="arr-history-body">
+    {% if not events %}
+      <p class="arr-history-empty">No history events available.</p>
+    {% else %}
+      <table class="arr-history-table">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Event</th>
+            <th>Release</th>
+            <th>Group</th>
+            <th>Indexer</th>
+            <th>Quality</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in events %}
+            <tr class="arr-history-row arr-event-{{ e.event_type | lower }}">
+              <td class="arr-history-date">{{ e.date }}</td>
+              <td class="arr-history-event">{{ e.event_type }}</td>
+              <td class="arr-history-release" title="{{ e.source_title }}">{{ e.source_title }}</td>
+              <td>{{ e.release_group or '-' }}</td>
+              <td>{{ e.indexer or '-' }}</td>
+              <td>{{ e.quality or '-' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+</div>

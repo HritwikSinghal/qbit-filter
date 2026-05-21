@@ -1,11 +1,15 @@
 {# Rule-selector strip. Variables:
-     rules: list of (slug, label, description, implemented: bool, match_count: int) #}
+     rules: list of dicts with (slug, label, description, implemented, match_count, active)
+     active_slug: slug of the currently-pressed rule chip (or '' for none).
+   Clicking an already-pressed chip toggles the preview off (server clears
+   sub.active_rule_slug and returns the unfiltered group list). #}
 <div id="rule-bar" class="rule-bar">
   <h3>Cleanup rule</h3>
   <div class="rule-chips">
     {% for r in rules %}
-      <button class="chip rule-chip"
+      <button class="chip rule-chip{% if r.active %} is-active{% endif %}"
               data-slug="{{ r.slug }}"
+              aria-pressed="{{ 'true' if r.active else 'false' }}"
               {% if not r.implemented %}disabled aria-disabled="true"{% endif %}
               hx-post="/rules/{{ r.slug }}/preview"
               hx-target="#groups"

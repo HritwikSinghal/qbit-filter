@@ -78,7 +78,12 @@ def render_group(
     rule_keeper: str = "",
     rule_factors: dict[str, tuple[ReasonFactor, ...]] | None = None,
     rule_severity: dict[str, str] | None = None,
+    pre_check_flagged: bool = False,
 ) -> str:
+    """Render a group card. ``pre_check_flagged=True`` pre-checks flagged
+    row checkboxes (used by the one-shot ``/rules/{slug}/preview`` response).
+    SSE-driven re-renders pass ``False`` so user edits to the selection
+    stick across background polls -- the client owns the selection Map."""
     seasons = seasons_of(group, store) if store is not None else []
     ordered = _order_torrents_for_display(torrents)
     arr_meta = _arr_meta_for_group(store, ordered) if store is not None else None
@@ -96,17 +101,47 @@ def render_group(
         rule_severity=rule_severity or {},
         arr_meta=arr_meta,
         arr_matches=arr_matches,
+        pre_check_flagged=pre_check_flagged,
     )
 
 
 def render_torrent(
-    request: Request, torrent: Torrent, *, store: Store | None = None
+    request: Request,
+    torrent: Torrent,
+    *,
+    store: Store | None = None,
+    marked: bool = False,
+    reason: str = "",
+    factors: tuple[ReasonFactor, ...] = (),
+    is_keeper: bool = False,
+    severity: str = "",
 ) -> str:
+    """Render a single torrent row. ``marked``/``factors``/``is_keeper``/
+    ``severity`` carry the active rule-preview context so SSE row updates
+    keep the row's data-marked highlight, reason chips, and keeper badge
+    instead of dropping back to the plain row format. Note: ``marked``
+    only drives data-marked highlight + reason chips; it does NOT
+    pre-check the row. The client owns the selection state via its
+    in-memory Map, so flagged rows the user explicitly unchecked stay
+    unchecked across SSE re-renders.
+    """
     arr_match: ArrMatch | None = None
     if store is not None and store.arr is not None:
         arr_match = store.arr.hash_to_arr.get(torrent.hash.lower())
     return _templates(request).get_template("_torrent.html").render(
-        request=request, torrent=torrent, arr_match=arr_match
+        request=request,
+        torrent=torrent,
+        arr_match=arr_match,
+        marked=marked,
+        reason=reason,
+        factors=factors,
+        is_keeper=is_keeper,
+        severity=severity,
+        # When True the template emits ``checked`` on the row checkbox.
+        # SSE row swaps never pre-check (the client owns selection state),
+        # so this is always False here. Initial preview render goes through
+        # render_groups_payload which uses its own pre-check policy.
+        pre_check=False,
     )
 
 
@@ -120,6 +155,7 @@ def render_groups_payload(
     rule_factors_by_group: dict[GroupKey, dict[str, tuple[ReasonFactor, ...]]]
     | None = None,
     rule_severity_by_group: dict[GroupKey, dict[str, str]] | None = None,
+    pre_check_flagged: bool = False,
 ) -> str:
     """Render the ``#groups`` inner HTML: active-filter strip + group cards.
 
@@ -169,6 +205,7 @@ def render_groups_payload(
                     rule_severity=rule_severity,
                     arr_meta=arr_meta,
                     arr_matches=arr_matches,
+                    pre_check_flagged=pre_check_flagged,
                 )
             )
     else:
@@ -203,9 +240,45 @@ def render_filter_facets(
 ) -> str:
     counts = count_by_facet(store)
     arr_configured = store.arr is not None and store.arr.configured
+    # Union of radarr + sonarr tag labels currently in use across the linked
+    # arr entities. Drives the "arr tags (exclude)" facet group; empty list
+    # hides the facet entirely so an arr without tags doesn't show a stub.
+    arr_tag_labels: list[str] = []
+    if store.arr is not None and store.arr.hash_to_arr:
+        seen: set[str] = set()
+        for m in store.arr.hash_to_arr.values():
+            for lbl in m.arr_tags:
+                if lbl and lbl not in seen:
+                    seen.add(lbl)
+                    arr_tag_labels.append(lbl)
+        arr_tag_labels.sort(key=str.lower)
     return _templates(request).get_template("_filters.html").render(
         request=request,
         counts=counts,
         filter_state=fs,
         store_arr_configured=arr_configured,
+        arr_tag_labels=arr_tag_labels,
+    )
+
+
+def render_arr_history_dialog(
+    request: Request,
+    *,
+    source: str,
+    entity_id: int,
+    entity_title: str,
+    events: list[dict[str, str]],
+) -> str:
+    """Render the per-entity arr history dialog body.
+
+    Returned blob is inner HTML for ``#arr-history-dialog`` -- the wrapping
+    modal scaffold lives in ``index.html`` so closing the dialog is just a
+    ``data-active="false"`` toggle.
+    """
+    return _templates(request).get_template("_arr_history_dialog.html").render(
+        request=request,
+        source=source,
+        entity_id=entity_id,
+        entity_title=entity_title,
+        events=events,
     )

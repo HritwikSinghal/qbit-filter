@@ -11,15 +11,19 @@
       <span class="toggle-count">{{ counts.multi_groups }}</span>
     </button>
   </div>
+  {# Trackers always render last and collapsed by default -- the list can
+     run into the dozens on a heavily-distributed seedbox and pushes the
+     more frequently used facets (Status / Category / Tags) off-screen
+     when expanded. #}
   {% set facet_specs = [
-    ('status',   counts.status,   'Status'),
-    ('category', counts.category, 'Category'),
-    ('tag',      counts.tag,      'Tags'),
-    ('tracker',  counts.tracker,  'Trackers'),
+    ('status',   counts.status,   'Status',   true),
+    ('category', counts.category, 'Category', true),
+    ('tag',      counts.tag,      'Tags',     true),
+    ('tracker',  counts.tracker,  'Trackers', false),
   ] %}
-  {% for facet, values, label in facet_specs %}
+  {% for facet, values, label, default_open in facet_specs %}
     {% if values %}
-      <details class="facet" open>
+      <details class="facet{% if facet == 'tracker' %} facet-trackers{% endif %}"{% if default_open %} open{% endif %}>
         <summary>
           <span class="facet-label">{{ label }}</span>
           <span class="chevron" aria-hidden="true">v</span>
@@ -107,5 +111,30 @@
         {% endfor %}
       </div>
     </details>
+    {% set _arr_tag_labels = arr_tag_labels | default([]) %}
+    {% if _arr_tag_labels %}
+      <details class="facet" open>
+        <summary>
+          <span class="facet-label">arr tags (exclude)</span>
+          <span class="chevron" aria-hidden="true">v</span>
+        </summary>
+        <div class="facet-chips arr-facets">
+          {% for label in _arr_tag_labels %}
+            {% set is_excluded = label in filter_state.not_arr_tags %}
+            <button class="chip facet-chip arr-chip{% if is_excluded %} arr-tag-excluded{% endif %}"
+                    type="button"
+                    aria-pressed="{{ 'true' if is_excluded else 'false' }}"
+                    data-facet="not_arr_tag"
+                    title="Exclude torrents whose arr entity carries the '{{ label }}' tag"
+                    hx-post="/filters"
+                    hx-vals='{"facet": "not_arr_tag", "value": "{{ label|e }}"}'
+                    hx-target="#groups"
+                    hx-swap="innerHTML">
+              <span class="chip-label">{% if is_excluded %}NOT {% endif %}{{ label }}</span>
+            </button>
+          {% endfor %}
+        </div>
+      </details>
+    {% endif %}
   {% endif %}
 </div>

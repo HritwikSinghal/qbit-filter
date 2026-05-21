@@ -9,13 +9,13 @@ from qbit_filter.domain import FilterState, TorrentStatus
 Facet = Literal[
     "status", "category", "tag", "tracker", "search", "min_torrents",
     "not_status", "not_category", "not_tag", "not_tracker",
-    "arr_monitored", "arr_cutoff",
+    "arr_monitored", "arr_cutoff", "not_arr_tag",
 ]
 _FACETS: frozenset[str] = frozenset(
     {
         "status", "category", "tag", "tracker", "search", "min_torrents",
         "not_status", "not_category", "not_tag", "not_tracker",
-        "arr_monitored", "arr_cutoff",
+        "arr_monitored", "arr_cutoff", "not_arr_tag",
     }
 )
 
@@ -127,6 +127,15 @@ def toggle(fs: FilterState, facet: str, value: str) -> FilterState:
         new_value = "any" if value == fs.arr_cutoff else value
         return _replace(fs, arr_cutoff=new_value)
 
+    if facet == "not_arr_tag":
+        # Toggle: clicking an active exclusion removes it. Empty / blank
+        # values are no-ops so a misclick doesn't poison the set.
+        v = value.strip()
+        if not v:
+            return fs
+        not_arr_tags = set(fs.not_arr_tags) ^ {v}
+        return _replace(fs, not_arr_tags=frozenset(not_arr_tags))
+
     return fs
 
 
@@ -152,6 +161,7 @@ def active_count(fs: FilterState) -> int:
         n += 1
     if fs.arr_cutoff != "any":
         n += 1
+    n += len(fs.not_arr_tags)
     return n
 
 
@@ -170,6 +180,7 @@ def _replace(
     min_torrents: int | None = None,
     arr_monitored: str | None = None,
     arr_cutoff: str | None = None,
+    not_arr_tags: frozenset[str] | None = None,
 ) -> FilterState:
     return FilterState(
         statuses=fs.statuses if statuses is None else statuses,
@@ -184,4 +195,5 @@ def _replace(
         min_torrents=fs.min_torrents if min_torrents is None else min_torrents,
         arr_monitored=fs.arr_monitored if arr_monitored is None else arr_monitored,  # type: ignore[arg-type]
         arr_cutoff=fs.arr_cutoff if arr_cutoff is None else arr_cutoff,  # type: ignore[arg-type]
+        not_arr_tags=fs.not_arr_tags if not_arr_tags is None else not_arr_tags,
     )

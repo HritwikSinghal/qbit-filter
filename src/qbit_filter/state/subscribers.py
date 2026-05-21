@@ -37,6 +37,11 @@ class Subscription:
     # per-row events for groups outside the visible window -- the user's
     # headline optimisation for ~1100-torrent stores.
     viewport: Viewport = field(default_factory=Viewport)
+    # Slug of the currently-active cleanup rule preview, or "" when no
+    # preview is active. SSE renders (RESYNC + per-row TORRENT_CHANGED) use
+    # this to recompute rule marks/keepers so the compare-strip layout
+    # survives background polls instead of reverting to the flat row stack.
+    active_rule_slug: str = ""
     # Loop reference captured at construction so :meth:`notify` can be
     # called safely from a worker thread (e.g. ``asyncio.to_thread``).
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)

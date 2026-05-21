@@ -22,11 +22,16 @@
      {% if _severity %}data-severity="{{ _severity }}"{% endif %}
      {% if _arr_match %}data-arr-source="{{ _arr_match.source }}" data-arr-monitored="{{ 'true' if _arr_match.monitored else 'false' }}" data-arr-cutoff="{{ 'met' if _arr_match.quality_cutoff_met else 'unmet' }}"{% endif %}
      {% if marked|default(false) %}title="{{ reason or '' }}"{% endif %}>
+  {# pre_check is True only for the initial /rules/{slug}/preview render so
+     the user gets all flagged rows auto-selected as the existing UX. SSE
+     re-renders (RESYNC, TORRENT_CHANGED) pass pre_check=False; the client
+     keeps the selection state authoritative via its in-memory Map. #}
+  {% set _pre_check = pre_check if pre_check is defined else marked|default(false) %}
   <input type="checkbox"
          class="row-check"
          aria-label="Select {{ t.name }}"
          data-hash="{{ t.hash }}"
-         {% if marked|default(false) %}checked{% endif %}>
+         {% if _pre_check %}checked{% endif %}>
   <span class="q-badge {{ _tier_class }}">
     {{ _tier }}{% if t.quality.source %} {{ t.quality.source }}{% endif %}
   </span>
@@ -41,6 +46,26 @@
     <span>{{ t.state.value }}</span>
     <span>R {{ '%.2f' | format(t.ratio) }}</span>
     {% if t.added_on %}<span>{{ t.added_on | fmt_date }}</span>{% endif %}
+    {% if _arr_match and _arr_match.release_group %}
+      <span class="arr-chip arr-release-group" title="Release group (from {{ _arr_match.source }} history)">{{ _arr_match.release_group }}</span>
+    {% endif %}
+    {% if _arr_match and _arr_match.indexer %}
+      <span class="arr-chip arr-indexer" title="Indexer (from {{ _arr_match.source }} history)">{{ _arr_match.indexer }}</span>
+    {% endif %}
+    {% if _arr_match and _arr_match.grab_count and _arr_match.grab_count >= 2 %}
+      <button type="button"
+              class="arr-history-badge"
+              title="{{ _arr_match.grab_count }} grab events in {{ _arr_match.source }} -- click for full history"
+              onclick="document.getElementById('arr-history-dialog').setAttribute('data-active','true')"
+              hx-get="/arr/history/{{ _arr_match.source }}/{{ _arr_match.entity_id }}"
+              hx-target="#arr-history-dialog"
+              hx-swap="innerHTML">
+        hist {{ _arr_match.grab_count }}x
+      </button>
+    {% endif %}
+    {% if _arr_match and _arr_match.queue_status_messages %}
+      <span class="arr-chip arr-error" title="{{ _arr_match.queue_status_messages | join(' | ') }}">arr: {{ _arr_match.queue_status_messages[0] }}</span>
+    {% endif %}
   </span>
   {% if _factors %}
     <span class="reason-factors">

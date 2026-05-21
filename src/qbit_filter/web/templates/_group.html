@@ -1,15 +1,19 @@
 {# Group card -- always-visible 1/4 left meta + 3/4 right rows.
    Variables:
-     group           Group dataclass
-     torrents        list[Torrent] (already ordered: best quality first)
-     seasons         list[int] (TV only; empty for movies)
-     rule_marks      dict[str, str]  -- {torrent_hash: reason}; optional
-     rule_keeper     str             -- keeper hash (Bundle 1); optional
-     rule_factors    dict[str, tuple[ReasonFactor, ...]]; optional
-     rule_severity   dict[str, str]  -- {torrent_hash: "warning"}; optional
-     arr_meta        ArrMatch | None -- arr-derived metadata for the group; optional
-     arr_matches     dict[str, ArrMatch] -- per-torrent arr matches; optional
+     group              Group dataclass
+     torrents           list[Torrent] (already ordered: best quality first)
+     seasons            list[int] (TV only; empty for movies)
+     rule_marks         dict[str, str]  -- {torrent_hash: reason}; optional
+     rule_keeper        str             -- keeper hash (Bundle 1); optional
+     rule_factors       dict[str, tuple[ReasonFactor, ...]]; optional
+     rule_severity      dict[str, str]  -- {torrent_hash: "warning"}; optional
+     arr_meta           ArrMatch | None -- arr-derived metadata for the group; optional
+     arr_matches        dict[str, ArrMatch] -- per-torrent arr matches; optional
+     pre_check_flagged  bool -- pre-check flagged-row checkboxes (one-shot
+                          preview render). SSE re-renders pass False so
+                          user edits to the selection stick.
 #}
+{% set _pre_check_flagged = pre_check_flagged | default(false) %}
 {% set _arr = arr_meta if arr_meta is defined else None %}
 {% set _arr_matches = arr_matches if arr_matches is defined else {} %}
 {% set _title = (_arr.title if _arr and _arr.title else group.title) %}
@@ -85,6 +89,7 @@
           {% set factors = (rule_factors | default({})).get(t.hash, ()) %}
           {% set severity = (rule_severity | default({})).get(t.hash, '') %}
           {% set is_keeper = t.hash == _keeper_hash %}
+          {% set pre_check = _pre_check_flagged and marked %}
           {% include '_torrent.html' with context %}
         {% endfor %}
       </div>
@@ -96,6 +101,7 @@
         {% set marked = reason is not none %}
         {% set factors = (rule_factors | default({})).get(t.hash, ()) %}
         {% set is_keeper = t.hash == _keeper_hash %}
+        {% set pre_check = _pre_check_flagged and marked %}
         {% include '_torrent.html' with context %}
       {% endfor %}
     </div>

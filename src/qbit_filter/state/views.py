@@ -39,7 +39,12 @@ def torrent_matches(t: Torrent, fs: FilterState, store: Store | None = None) -> 
     if fs.trackers and not (fs.trackers & set(t.trackers)):
         return False
     # *arr-derived filters: skip cleanly when arr store isn't available.
-    if fs.arr_monitored != "any" or fs.arr_cutoff != "any":
+    arr_filter_active = (
+        fs.arr_monitored != "any"
+        or fs.arr_cutoff != "any"
+        or bool(fs.not_arr_tags)
+    )
+    if arr_filter_active:
         if store is None or store.arr is None:
             # arr filter active but no data -> treat as no-match so the UI
             # doesn't show stale rows when arr is configured-but-loading.
@@ -59,6 +64,15 @@ def torrent_matches(t: Torrent, fs: FilterState, store: Store | None = None) -> 
             match is None or match.quality_cutoff_met
         ):
             return False
+        # arr-tag exclusion: a torrent whose match carries any excluded arr
+        # tag is filtered out. Torrents with no arr match always pass --
+        # the exclusion is scoped to arr-tagged content only.
+        if (
+            fs.not_arr_tags
+            and match is not None
+            and (fs.not_arr_tags & match.arr_tags)
+        ):
+            return False
     return True
 
 
@@ -74,6 +88,7 @@ def _group_passes(group: Group, store: Store, fs: FilterState) -> bool:
         or fs.not_statuses or fs.not_categories
         or fs.not_tags or fs.not_trackers
         or fs.arr_monitored != "any" or fs.arr_cutoff != "any"
+        or bool(fs.not_arr_tags)
     )
     required = max(1, fs.min_torrents)
     if not has_facet:

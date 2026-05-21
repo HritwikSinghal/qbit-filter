@@ -8,10 +8,12 @@ import logging
 
 from qbit_filter.cleanup.rules import (
     ArrCutoffMetColdRule,
+    ArrImportBrokenRule,
     ArrUnmonitoredCompletedRule,
     CrossSeedDuplicateRule,
     DeadTrackerRule,
     DuplicateSameQualityRule,
+    OrphanedArrTagRule,
     OrphanedOnDiskRule,
     PathCollisionRule,
     RatioMetAndColdRule,
@@ -29,6 +31,8 @@ RULES: tuple[Rule, ...] = (
     RatioMetAndColdRule(),
     ArrCutoffMetColdRule(),
     ArrUnmonitoredCompletedRule(),
+    ArrImportBrokenRule(),
+    OrphanedArrTagRule(),
     DeadTrackerRule(),
     CrossSeedDuplicateRule(),
     OrphanedOnDiskRule(),

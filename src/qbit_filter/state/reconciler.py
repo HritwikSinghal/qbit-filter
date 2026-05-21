@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +20,7 @@ from qbit_filter.domain import (
     Torrent,
     TorrentStatus,
 )
+from qbit_filter.grouping import parser
 from qbit_filter.grouping.grouper import assign
 from qbit_filter.grouping.parser import ParsedName, parse
 from qbit_filter.grouping.quality import parse_quality
@@ -25,6 +28,14 @@ from qbit_filter.state.events import EventBus
 from qbit_filter.state.store import Store
 
 logger = logging.getLogger(__name__)
+
+# Above this many uncached names per warm call, spread the work across a
+# ``ProcessPoolExecutor``. Below it, the IPC + pickling overhead outweighs
+# the CPU parallelism: the in-thread loop wins for the steady-state case
+# where almost every name is already cached. The cold-boot full-update
+# is the only realistic scenario where this kicks in -- exactly where
+# the multi-second blocking would otherwise hurt most.
+_POOL_THRESHOLD = 64
 
 # Fields that change the group-key, the status badge, or any other row
 # property the user reads when deciding what to act on. A delta touching
@@ -101,17 +112,53 @@ def _torrent_from_raw(h: str, raw: dict[str, Any]) -> Torrent:
     )
 
 
+def _pool_parse_one(name: str) -> ParsedName:
+    """Subprocess entry point. The parent sends only the raw name string
+    and receives a ``ParsedName`` frozen dataclass back."""
+    return parser.parse_uncached(name)
+
+
 def _warm_parse_cache(names: list[str]) -> None:
-    """Populate :func:`qbit_filter.grouping.parser.parse`'s ``lru_cache`` for
-    a batch of torrent names off the event loop. Subsequent ``parse(name)``
-    calls in the reconciler become cache lookups (~1us each).
+    """Populate the parser cache for a batch of torrent names off the event
+    loop. Subsequent ``parse(name)`` calls become dict lookups (~100 ns).
+
+    Names already in the cache (typical for warm boots, where the
+    persistent disk cache hydrated them) cost nothing. Of the rest, when
+    the batch is big enough to amortise IPC overhead, fan out to a
+    ``ProcessPoolExecutor`` so multiple CPU cores share the guessit
+    work; the GIL would otherwise serialise everything on one thread.
 
     Also warms :func:`parse_quality` for the same names so the quality
     lru_cache is hot when the reconciler builds Torrent objects.
     """
+    uncached = [n for n in names if n and not parser.is_cached(n)]
+    if uncached and len(uncached) >= _POOL_THRESHOLD:
+        # Up to N-1 cores -- leave one for the event loop + reconciler.
+        workers = max(1, min((os.cpu_count() or 2) - 1, 8))
+        try:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=workers
+            ) as pool:
+                # ``map`` preserves input order, so zip by index is safe.
+                results = list(
+                    pool.map(_pool_parse_one, uncached, chunksize=32)
+                )
+            for name, parsed_name in zip(uncached, results, strict=True):
+                parser.prime(name, parsed_name)
+        except Exception:
+            # Pool fan-out is a best-effort speedup; fall through to the
+            # in-thread path so a broken multiprocessing environment
+            # just costs latency, not correctness.
+            logger.exception(
+                "parse pool fan-out failed; falling back to in-thread"
+            )
+            for name in uncached:
+                parse(name)
+    else:
+        for name in uncached:
+            parse(name)
     for name in names:
         if name:
-            parse(name)
             parse_quality(name)
 
 

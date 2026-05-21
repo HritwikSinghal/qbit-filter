@@ -18,6 +18,7 @@ from qbit_filter.arr.index import build_index
 from qbit_filter.arr.sync import poll_arr
 from qbit_filter.config import Settings
 from qbit_filter.domain import DomainEvent, EventKind
+from qbit_filter.grouping import parser as grouping_parser
 from qbit_filter.qbit.client import connect
 from qbit_filter.qbit.sync import poll
 from qbit_filter.state.arr_store import ArrStore
@@ -162,6 +163,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if client is not None:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(client.auth_log_out)
+        # Persist the parser cache so the next boot can skip guessit for
+        # every name still in qBit. Best-effort -- a save failure is logged
+        # by the cache module and doesn't block shutdown.
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(grouping_parser.dump_to_disk)
 
 
 def create_app() -> FastAPI:

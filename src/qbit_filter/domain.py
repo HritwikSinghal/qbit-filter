@@ -148,6 +148,12 @@ class FilterState:
     # this torrent. Tri-state for monitored; ``arr_cutoff`` is met/unmet/any.
     arr_monitored: Literal["any", "monitored", "unmonitored", "orphan"] = "any"
     arr_cutoff: Literal["any", "met", "unmet"] = "any"
+    # Exclusion set of arr-defined tag labels. A torrent whose matched arr
+    # entity carries any of these labels is filtered out. The label set is
+    # populated by clicking sidebar chips that mirror arr's own tag list,
+    # turning arr's retention labels (e.g. "permanent", "archive") into a
+    # one-shot exclusion filter without duplicating the policy here.
+    not_arr_tags: frozenset[str] = frozenset()
 
     @property
     def is_empty(self) -> bool:
@@ -164,6 +170,7 @@ class FilterState:
             and self.min_torrents <= 1
             and self.arr_monitored == "any"
             and self.arr_cutoff == "any"
+            and not self.not_arr_tags
         )
 
 

@@ -50,7 +50,12 @@
   --sidebar-w: 264px;
   --appbar-h: 56px;
   --row-h: 56px;
-  --content-max: 1400px;
+  /* Fluid content width. Was a hard 1400px cap which left wide-screen
+     monitors (1920px+) staring at empty pixels on the right. ``none``
+     lets the grid's ``1fr`` column expand all the way to the viewport
+     edge so tabular row data and the compare strip have room to
+     breathe. */
+  --content-max: none;
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 10px;
