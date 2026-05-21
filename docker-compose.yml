@@ -1,0 +1,19 @@
+services:
+  qbit-filter:
+    build: .
+    image: qbit-filter:dev
+    container_name: qbit-filter
+    ports:
+      - "8080:8765"
+    env_file:
+      - .env
+    environment:
+      LISTEN_HOST: 0.0.0.0
+      LISTEN_PORT: "8765"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=2).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
