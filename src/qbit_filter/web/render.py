@@ -75,15 +75,24 @@ def render_group(
     *,
     store: Store | None = None,
     rule_marks: dict[str, str] | None = None,
-    rule_keeper: str = "",
+    rule_keepers: frozenset[str] = frozenset(),
     rule_factors: dict[str, tuple[ReasonFactor, ...]] | None = None,
     rule_severity: dict[str, str] | None = None,
     pre_check_flagged: bool = False,
 ) -> str:
-    """Render a group card. ``pre_check_flagged=True`` pre-checks flagged
-    row checkboxes (used by the one-shot ``/rules/{slug}/preview`` response).
-    SSE-driven re-renders pass ``False`` so user edits to the selection
-    stick across background polls -- the client owns the selection Map."""
+    """Render a group card.
+
+    ``rule_keepers`` is the set of hashes the active rule recommends keeping
+    in this group. It's a SET (not a single string) so per-season buckets in
+    TV groups can surface one keeper per season -- e.g., a show with mixed
+    quality across S01/S02/S03 shows the S01 2160p, S02 2160p, and S03 2160p
+    as keepers in the compare strip.
+
+    ``pre_check_flagged=True`` pre-checks flagged row checkboxes (used by
+    the one-shot ``/rules/{slug}/preview`` response). SSE-driven re-renders
+    pass ``False`` so user edits to the selection stick across background
+    polls -- the client owns the selection Map.
+    """
     seasons = seasons_of(group, store) if store is not None else []
     ordered = _order_torrents_for_display(torrents)
     arr_meta = _arr_meta_for_group(store, ordered) if store is not None else None
@@ -96,7 +105,7 @@ def render_group(
         torrents=ordered,
         seasons=seasons,
         rule_marks=rule_marks or {},
-        rule_keeper=rule_keeper,
+        rule_keepers=rule_keepers,
         rule_factors=rule_factors or {},
         rule_severity=rule_severity or {},
         arr_meta=arr_meta,
@@ -151,7 +160,7 @@ def render_groups_payload(
     fs: FilterState,
     visible: list[Group] | None = None,
     rule_marks_by_group: dict[GroupKey, dict[str, str]] | None = None,
-    rule_keepers_by_group: dict[GroupKey, str] | None = None,
+    rule_keepers_by_group: dict[GroupKey, frozenset[str]] | None = None,
     rule_factors_by_group: dict[GroupKey, dict[str, tuple[ReasonFactor, ...]]]
     | None = None,
     rule_severity_by_group: dict[GroupKey, dict[str, str]] | None = None,
@@ -171,9 +180,12 @@ def render_groups_payload(
     ``{group_key: {torrent_hash: reason}}``. Rows whose hash is in the inner
     dict render pre-selected with the reason chip inline.
 
-    ``rule_keepers_by_group`` carries the rule's recommended keeper hash per
-    group (empty string when the rule has no opinion). ``rule_factors_by_group``
-    is the structured-pill breakdown of *why* per candidate hash.
+    ``rule_keepers_by_group`` carries the rule's recommended keeper hashes
+    per group (empty frozenset when the rule has no opinion). It's a SET
+    so per-season buckets in TV groups can surface multiple keepers --
+    e.g., S01 2160p AND S02 2160p AND S03 2160p when each season has its
+    own upgrade candidate. ``rule_factors_by_group`` is the
+    structured-pill breakdown of *why* per candidate hash.
     ``rule_severity_by_group`` is the row-level severity hint per candidate
     hash; rows whose severity is ``"warning"`` get a yellow tint in addition
     to the standard flagged styling.
@@ -185,7 +197,9 @@ def render_groups_payload(
     if visible:
         for group in visible:
             rule_marks = (rule_marks_by_group or {}).get(group.key, {})
-            rule_keeper = (rule_keepers_by_group or {}).get(group.key, "")
+            rule_keepers = (rule_keepers_by_group or {}).get(
+                group.key, frozenset()
+            )
             rule_factors = (rule_factors_by_group or {}).get(group.key, {})
             rule_severity = (rule_severity_by_group or {}).get(group.key, {})
             ordered = _order_torrents_for_display(
@@ -200,7 +214,7 @@ def render_groups_payload(
                     torrents=ordered,
                     seasons=seasons_of(group, store),
                     rule_marks=rule_marks,
-                    rule_keeper=rule_keeper,
+                    rule_keepers=rule_keepers,
                     rule_factors=rule_factors,
                     rule_severity=rule_severity,
                     arr_meta=arr_meta,

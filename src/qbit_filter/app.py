@@ -34,23 +34,54 @@ _WEB_DIR = Path(__file__).parent / "web"
 _TEMPLATES_DIR = _WEB_DIR / "templates"
 _STATIC_DIR = _WEB_DIR / "static"
 
+# Cap on the rolling activity log surfaced in the dialog. The CSS panel
+# scrolls beyond this anyway, but trimming server-side keeps the SSE
+# payload small.
+_ACTIVITY_LOG_MAX = 16
+
+
+def _append_activity(store: Store, line: str) -> None:
+    """Append one line to the shared background-activity log on ``store``.
+
+    Trims to the most recent ``_ACTIVITY_LOG_MAX`` entries so a long-running
+    process doesn't grow the in-memory log unboundedly (and so the
+    rendered SSE payload stays small).
+    """
+    store.cold_boot_log.append(line)
+    if len(store.cold_boot_log) > _ACTIVITY_LOG_MAX:
+        del store.cold_boot_log[: len(store.cold_boot_log) - _ACTIVITY_LOG_MAX]
+
 
 async def _poller(
     app: FastAPI,
     reconciler: Reconciler,
     settings: Settings,
 ) -> None:
+    store: Store = app.state.store
+    store.qbit_host = settings.qbittorrent_host
+    _append_activity(store, f"Connecting to qBittorrent at {settings.qbittorrent_host}")
     try:
         client = await asyncio.to_thread(connect, settings)
-    except Exception:
+    except Exception as exc:
         logger.exception("could not connect to qBittorrent; poller exiting")
+        store.qbit_connected = False
+        store.qbit_last_error = f"connect failed: {exc}"
+        _append_activity(store, f"qBittorrent connect failed: {exc}")
         return
     app.state.qbit = client
+    store.qbit_connected = True
+    store.qbit_last_error = ""
+    _append_activity(store, "qBittorrent connected -- subscribing to sync/maindata")
     async for delta in poll(client, settings):
         try:
             await reconciler.apply(delta)
-        except Exception:
+        except Exception as exc:
             logger.exception("reconciler.apply raised")
+            store.qbit_last_error = f"reconciler failed: {exc}"
+            continue
+        store.qbit_last_poll_at = time.time()
+        store.qbit_poll_count += 1
+        store.qbit_last_error = ""
 
 
 async def _arr_poller(
@@ -77,6 +108,15 @@ async def _arr_poller(
 
     last_snapshot: ArrSnapshot | None = None
     qbit_resync_event = asyncio.Event()
+    # Tracks the last service-state we logged so steady-state successes don't
+    # spam one "connected" line per minute. Keys are "radarr" / "sonarr",
+    # values are the last reported state ("ok" / "down" / "").
+    last_logged_state: dict[str, str] = {"radarr": "", "sonarr": ""}
+
+    if settings.radarr_url and settings.radarr_api_key:
+        _append_activity(store, f"Contacting Radarr at {settings.radarr_url}")
+    if settings.sonarr_url and settings.sonarr_api_key:
+        _append_activity(store, f"Contacting Sonarr at {settings.sonarr_url}")
 
     class _QbitListener:
         """Subscriber on the qBit/arr bus that wakes the rebuild loop on
@@ -105,16 +145,31 @@ async def _arr_poller(
             **snapshot.quality_profiles_radarr,
             **snapshot.quality_profiles_sonarr,
         }
-        arr_store.radarr_ok = (
-            bool(snapshot.movies)
-            or bool(snapshot.radarr_queue)
-            or bool(snapshot.radarr_history)
-        )
-        arr_store.sonarr_ok = (
-            bool(snapshot.series)
-            or bool(snapshot.sonarr_queue)
-            or bool(snapshot.sonarr_history)
-        )
+        # ``radarr_ok`` / ``sonarr_ok`` now reflect "last fetch reached the
+        # service" rather than "has any data". The activity dialog reads
+        # both flags directly and renders the queue + last-fetch summary.
+        # Untouched on the first failure-after-success so the dialog can
+        # display the previously good counts with an inline "down" badge.
+        now = time.time()
+        if snapshot.radarr_attempted:
+            arr_store.radarr_ok = snapshot.radarr_fetched
+            if snapshot.radarr_fetched:
+                arr_store.radarr_last_fetch_at = now
+                arr_store.radarr_last_err = ""
+                arr_store.radarr_queue_count = len(snapshot.radarr_queue)
+                arr_store.radarr_history_count = len(snapshot.radarr_history)
+            else:
+                arr_store.radarr_last_err = snapshot.radarr_error
+        if snapshot.sonarr_attempted:
+            arr_store.sonarr_ok = snapshot.sonarr_fetched
+            if snapshot.sonarr_fetched:
+                arr_store.sonarr_last_fetch_at = now
+                arr_store.sonarr_last_err = ""
+                arr_store.sonarr_queue_count = len(snapshot.sonarr_queue)
+                arr_store.sonarr_history_count = len(snapshot.sonarr_history)
+            else:
+                arr_store.sonarr_last_err = snapshot.sonarr_error
+        arr_store.arr_fetch_cycles += 1
 
     def _rebuild_index_and_publish() -> int:
         """Re-run build_index against the cached arr snapshot + current
@@ -134,6 +189,16 @@ async def _arr_poller(
         # a half-mutated state.
         arr_store.hash_to_arr = new_index
         arr_store.rid += 1
+        # Counts per source so the activity dialog can render
+        # "Linked N (Radarr) / M (Sonarr)" instead of a single opaque total.
+        radarr_matches = sum(
+            1 for m in new_index.values() if m.source == "radarr"
+        )
+        sonarr_matches = sum(
+            1 for m in new_index.values() if m.source == "sonarr"
+        )
+        arr_store.radarr_match_count = radarr_matches
+        arr_store.sonarr_match_count = sonarr_matches
         bus.remove(listener)
         try:
             bus.publish(DomainEvent(kind=EventKind.RESYNC))
@@ -143,11 +208,76 @@ async def _arr_poller(
             bus.add(listener)
         return len(new_index)
 
+    def _log_arr_state_change(snapshot: ArrSnapshot) -> None:
+        """Append log lines when a service's reachability flips.
+
+        Steady-state success only emits one line on first connect; subsequent
+        successful fetches are silent (the live counters under each service
+        card already convey "still working"). Failures always log so the
+        user can correlate a stalled UI with an arr outage.
+        """
+        for name, attempted, fetched, error, count_a, count_b in (
+            (
+                "Radarr",
+                snapshot.radarr_attempted,
+                snapshot.radarr_fetched,
+                snapshot.radarr_error,
+                len(snapshot.movies),
+                len(snapshot.radarr_queue),
+            ),
+            (
+                "Sonarr",
+                snapshot.sonarr_attempted,
+                snapshot.sonarr_fetched,
+                snapshot.sonarr_error,
+                len(snapshot.series),
+                len(snapshot.sonarr_queue),
+            ),
+        ):
+            if not attempted:
+                continue
+            key = name.lower()
+            new_state = "ok" if fetched else "down"
+            prior = last_logged_state[key]
+            if new_state == prior:
+                continue
+            last_logged_state[key] = new_state
+            if fetched:
+                unit = "movies" if name == "Radarr" else "series"
+                _append_activity(
+                    store,
+                    f"{name} OK -- {count_a} {unit}, {count_b} in queue",
+                )
+            else:
+                _append_activity(
+                    store,
+                    f"{name} unreachable -- {error or 'unknown error'}",
+                )
+
     async def arr_fetch_loop() -> None:
         async for snapshot in poll_arr(settings):
             _apply_snapshot(snapshot)
+            _log_arr_state_change(snapshot)
             qbit_rid = store.rid
             matches = _rebuild_index_and_publish()
+            # Surface the first successful link in the activity log so the
+            # user sees arr work happening alongside qBit chunks. Subsequent
+            # cycles add a "Refreshed" line so the dialog feels live even
+            # during steady-state -- trim cap stops the log growing.
+            if arr_store.arr_fetch_cycles == 1 and matches > 0:
+                _append_activity(
+                    store,
+                    f"Linked {matches} torrents -- "
+                    f"{arr_store.radarr_match_count} Radarr / "
+                    f"{arr_store.sonarr_match_count} Sonarr",
+                )
+            elif arr_store.arr_fetch_cycles > 1 and (
+                snapshot.radarr_fetched or snapshot.sonarr_fetched
+            ):
+                _append_activity(
+                    store,
+                    f"Refreshed arr index -- {matches} linked torrents",
+                )
             logger.info(
                 "arr fetched: %d movies, %d series, %d matches (qbit_rid=%d)",
                 len(arr_store.movies_by_id),

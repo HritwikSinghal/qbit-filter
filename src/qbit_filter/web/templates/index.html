@@ -7,6 +7,40 @@
   <span class="meta">
     {{ total_torrents }} torrents &middot; {{ total_groups }} groups
   </span>
+  {# Background activity widget. SSE-driven; the server rewrites this
+     element's outerHTML on every RESYNC / RESYNC_PARTIAL via
+     _render_activity_oob (see web/routes.py). Initial state is
+     ``Contacting qBittorrent`` so a cold-cache first paint shows
+     immediate feedback before the first SSE message lands. #}
+  <div id="qf-activity" class="qf-activity" data-state="active" data-open="false">
+    <button id="qf-activity-btn"
+            type="button"
+            class="qf-activity-btn"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="qf-activity-panel"
+            title="Contacting qBittorrent">
+      <span class="qf-activity-pulse" aria-hidden="true"></span>
+      <span class="qf-activity-button-label">Contacting qBittorrent</span>
+    </button>
+    <div id="qf-activity-panel" class="qf-activity-panel" role="dialog" aria-label="Background activity" aria-hidden="true">
+      <div class="qf-activity-head">
+        <span class="qf-activity-title">Background activity</span>
+        <span class="qf-activity-pct">--</span>
+      </div>
+      <div class="qf-activity-summary">Waiting for first response from qBittorrent</div>
+      <div class="qf-activity-bar">
+        <div class="qf-activity-bar-fill" style="width:0%"></div>
+      </div>
+      {# Service cards: rebuilt server-side as soon as the first SSE
+         RESYNC lands. The initial markup ships an empty grid so the
+         layout doesn't visibly jump when the swap happens. #}
+      <div class="qf-activity-services"></div>
+      <ol class="qf-activity-log">
+        <li>Page loaded -- opening event stream</li>
+      </ol>
+    </div>
+  </div>
   <span class="live" aria-live="polite">live</span>
   <button class="btn" id="theme-toggle" aria-label="Toggle theme">Theme</button>
 </header>
@@ -54,12 +88,6 @@
          into #groups (replace if id exists, append otherwise). Always
          hidden -- it's a holding pen, never user-visible. #}
       <div id="qf-batch-staging" hidden></div>
-
-      {# Progress block. Sibling-after-#groups so CSS naturally places
-         it below the last card. Server populates inner HTML each batch
-         with the bar + label; the final batch sends an empty payload
-         so :empty hides it. #}
-      <div id="qf-load-progress" class="qf-load-progress" aria-live="polite"></div>
     </div>
 
     {% include "_selection_bar.html" %}

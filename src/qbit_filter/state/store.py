@@ -28,6 +28,32 @@ class Store:
     # in ``app.py``; this is a read-only handle from the qBit store's POV.
     # None when no *arr instance is configured.
     arr: ArrStore | None = None
+    # Cold-boot streaming state. The reconciler's chunked path stamps the
+    # qBit total here when a first full_update lands so the SSE progress UI
+    # has a stable denominator across partials (otherwise the bar moves
+    # backwards as later chunks reveal more groups than the first one knew
+    # about). ``cold_boot_done`` flips once the final chunk publishes its
+    # RESYNC; the SSE renderer uses it to drop the progress block.
+    # ``cold_boot_log`` is the shared activity log shown under the bar --
+    # appended to by the reconciler (per chunk) and the arr poller (first
+    # successful index) so the user can see what's happening between
+    # chunks.
+    cold_boot_total: int = 0
+    cold_boot_processed: int = 0
+    cold_boot_done: bool = False
+    cold_boot_log: list[str] = field(default_factory=list)
+    # qBit connection telemetry surfaced by the activity dialog. Mutated by
+    # ``app._poller`` on connect/disconnect and by ``Reconciler.apply`` on
+    # every successful poll cycle. ``qbit_last_poll_at`` is a wall-clock
+    # timestamp (``time.time()``) so the browser can render it as
+    # "N seconds ago" relative to its own clock; monotonic time would be
+    # meaningless across the process / client boundary. ``qbit_last_error``
+    # is cleared on the next successful poll.
+    qbit_connected: bool = False
+    qbit_last_poll_at: float = 0.0
+    qbit_poll_count: int = 0
+    qbit_last_error: str = ""
+    qbit_host: str = ""
 
     def snapshot_groups(self) -> list[Group]:
         return list(self.groups.values())

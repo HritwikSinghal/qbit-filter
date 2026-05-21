@@ -170,3 +170,15 @@ class ArrSnapshot:
     sonarr_tag_labels: dict[int, str] = field(default_factory=dict)
     # Empty when both arr URLs are unset.
     ok: bool = False
+    # Per-service fetch outcome -- distinct from ``ok`` (which is "any arr
+    # configured"). ``*_attempted`` flips True when the URL+key are set so a
+    # consumer can distinguish "not configured" from "configured but down".
+    # ``*_fetched`` flips True only when ALL endpoint calls for that
+    # service returned without raising. ``*_error`` carries the most recent
+    # failure's message, empty when ``*_fetched`` is True.
+    radarr_attempted: bool = False
+    sonarr_attempted: bool = False
+    radarr_fetched: bool = False
+    sonarr_fetched: bool = False
+    radarr_error: str = ""
+    sonarr_error: str = ""

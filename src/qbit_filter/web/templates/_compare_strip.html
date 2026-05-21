@@ -1,6 +1,8 @@
-{# Side-by-side comparison strip: KEEPER on the left, FLAGGED on the right.
-   Rendered when a rule preview is active and the group has both a keeper
-   and at least one flagged sibling.
+{# Side-by-side comparison strip: KEEPER(S) on the left, FLAGGED on the right.
+   Rendered when a rule preview is active and the group has at least one
+   keeper and at least one flagged sibling. Multi-season TV groups can
+   produce multiple keepers (one per season); the keeper column lists all
+   of them stacked.
 
    Each row uses a vertically-stacked layout inside the narrow compare
    column so the torrent name, quality badge, reason factors, and meta
@@ -10,7 +12,8 @@
                          [meta + factors -- wraps]
 
    Variables:
-     keeper          Torrent that the rule recommends keeping
+     keepers         list[Torrent] -- the rule's recommended keepers
+                     (one per season for TV; usually one per group for movies)
      flagged         list[Torrent] -- candidates the rule wants to remove
      rule_factors    dict[hash, tuple[ReasonFactor]] -- inline pills per row
      rule_marks      dict[hash, reason] -- prose fallback for tooltip
@@ -23,32 +26,34 @@
   <div class="compare-col keeper">
     <div class="compare-col-head">
       <span class="keeper-badge" title="Rule's recommended keeper">K</span>
-      <span>KEEPER</span>
+      <span>KEEPER{{ '' if keepers | length == 1 else 'S' }} ({{ keepers | length }})</span>
     </div>
-    {% set _keeper_tier = keeper.quality.tier.value %}
-    {% set _keeper_tier_class = 'tier-unknown' if _keeper_tier == 'unknown' else 'tier-' + _keeper_tier.rstrip('p').lower() %}
-    <div class="torrent-row compare-row keeper-row {{ _keeper_tier_class }}"
-         data-hash="{{ keeper.hash }}"
-         data-state="{{ keeper.state.value }}"
-         data-tier="{{ _keeper_tier }}"
-         data-marked="false"
-         data-keeper="true">
-      <div class="compare-row-head">
-        <input type="checkbox" class="row-check" aria-label="Select {{ keeper.name }}"
-               data-hash="{{ keeper.hash }}">
-        <span class="q-badge {{ _keeper_tier_class }}">
-          {{ _keeper_tier }}{% if keeper.quality.source %} {{ keeper.quality.source }}{% endif %}
-        </span>
-        <span class="name" title="{{ keeper.name }}">{{ keeper.name }}</span>
+    {% for keeper in keepers %}
+      {% set _keeper_tier = keeper.quality.tier.value %}
+      {% set _keeper_tier_class = 'tier-unknown' if _keeper_tier == 'unknown' else 'tier-' + _keeper_tier.rstrip('p').lower() %}
+      <div class="torrent-row compare-row keeper-row {{ _keeper_tier_class }}"
+           data-hash="{{ keeper.hash }}"
+           data-state="{{ keeper.state.value }}"
+           data-tier="{{ _keeper_tier }}"
+           data-marked="false"
+           data-keeper="true">
+        <div class="compare-row-head">
+          <input type="checkbox" class="row-check" aria-label="Select {{ keeper.name }}"
+                 data-hash="{{ keeper.hash }}">
+          <span class="q-badge {{ _keeper_tier_class }}">
+            {{ _keeper_tier }}{% if keeper.quality.source %} {{ keeper.quality.source }}{% endif %}
+          </span>
+          <span class="name" title="{{ keeper.name }}">{{ keeper.name }}</span>
+        </div>
+        <div class="compare-row-meta">
+          <span class="meta">
+            <span data-bytes="{{ keeper.size }}">{{ (keeper.size / 1073741824) | round(2) }} GB</span>
+            <span>R {{ '%.2f' | format(keeper.ratio) }}</span>
+            {% if keeper.added_on %}<span>{{ keeper.added_on | fmt_date }}</span>{% endif %}
+          </span>
+        </div>
       </div>
-      <div class="compare-row-meta">
-        <span class="meta">
-          <span data-bytes="{{ keeper.size }}">{{ (keeper.size / 1073741824) | round(2) }} GB</span>
-          <span>R {{ '%.2f' | format(keeper.ratio) }}</span>
-          {% if keeper.added_on %}<span>{{ keeper.added_on | fmt_date }}</span>{% endif %}
-        </span>
-      </div>
-    </div>
+    {% endfor %}
   </div>
   <div class="compare-col flagged">
     <div class="compare-col-head danger">

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import secrets
@@ -70,6 +71,17 @@ _STREAM_FLUSH_BYTES = 16 * 1024
 # expand so total wall-clock isn't dominated by per-batch framing overhead.
 # After the last entry, the final size is reused for any remaining groups.
 _RESYNC_BATCH_SIZES = (10, 25, 50, 100, 100, 100)
+
+# Maximum number of activity-log lines rendered into the background-activity
+# dialog. Mirrors the trim cap in ``app._append_activity`` -- kept local so
+# routes.py doesn't import from app.py (the inverse direction).
+_ACTIVITY_LOG_MAX = 16
+
+# Seconds-since-last-fetch thresholds that flip a service card from "ok"
+# (live data) to "stale" (data on hand, but not refreshed recently). The
+# ``down`` state is independent and is keyed off the last fetch raising.
+_QBIT_STALE_AFTER = 15.0
+_ARR_STALE_AFTER = 180.0
 
 
 def _get_or_create_subscription(
@@ -170,7 +182,7 @@ def _rule_preview_context(
     store: Store, sub: Subscription
 ) -> tuple[
     dict[GroupKey, dict[str, str]],
-    dict[GroupKey, str],
+    dict[GroupKey, frozenset[str]],
     dict[GroupKey, dict[str, tuple[Any, ...]]],
     dict[GroupKey, dict[str, str]],
     list[GroupKey],
@@ -193,7 +205,14 @@ def _rule_preview_context(
         return {}, {}, {}, {}, []
     fs = sub.filter_state
     by_group: dict[GroupKey, dict[str, str]] = {}
-    keepers: dict[GroupKey, str] = {}
+    # Accumulate ALL keeper hashes per group, not just the first one. TV
+    # groups now partition by season inside the rule (see
+    # ``cleanup/rules.py:_partition_by_season``), so a multi-season show
+    # produces one candidate per affected season -- each with its own
+    # keeper. Storing a single keeper per group_key would silently hide
+    # the per-season keepers for S01/S02 and leave only the S03 keeper
+    # showing in the compare strip.
+    keepers_acc: dict[GroupKey, set[str]] = {}
     factors_by_group: dict[GroupKey, dict[str, tuple[Any, ...]]] = {}
     severity_by_group: dict[GroupKey, dict[str, str]] = {}
     for c in rule.candidates(store):
@@ -210,8 +229,9 @@ def _rule_preview_context(
             severity_by_group.setdefault(c.group_key, {})[
                 c.torrent_hash
             ] = c.severity
-        if c.keeper_hash and c.group_key not in keepers:
-            keepers[c.group_key] = c.keeper_hash
+        if c.keeper_hash:
+            keepers_acc.setdefault(c.group_key, set()).add(c.keeper_hash)
+    keepers = {k: frozenset(v) for k, v in keepers_acc.items()}
     ordered = sorted(by_group.keys(), key=lambda k: store.groups[k].title.lower())
     return by_group, keepers, factors_by_group, severity_by_group, ordered
 
@@ -285,8 +305,9 @@ def register_routes(app: FastAPI) -> None:
             if not visible:
                 # Distinguish "store still warming up (no torrents yet)" from
                 # "filter excludes everything". The former hands the screen to
-                # the batched-RESYNC progress block (see static/keys.js
-                # setupLoadProgress + applyBatchStaging); the latter shows a
+                # the header activity widget (the chrome ships it in the
+                # "Contacting qBittorrent" state, and applyBatchStaging fills
+                # #groups as RESYNC_PARTIAL chunks land); the latter shows a
                 # guidance message with a Clear-all button.
                 if (
                     not store.torrents
@@ -777,6 +798,354 @@ def _esc_for_sse(html: str) -> str:
     return html.replace("\r", "").replace("\n", "")
 
 
+def _render_activity_oob(store: Store) -> str:
+    """Render the header activity widget as a single OOB swap.
+
+    Always emits an outerHTML swap of ``#qf-activity`` so the widget's
+    ``data-state`` (idle / active / done / stalled), button label,
+    percentage, bar fill, services grid, and log can all update from one
+    payload. The open/close state of the dropdown panel is owned
+    client-side (``data-open`` on the same element, repainted by the
+    keys.js click handler after each swap) so the swap doesn't fight a
+    user who has the panel expanded.
+
+    Three signal layers stack inside the panel:
+
+    1. *Headline* -- one summary line + a progress bar. During cold-boot
+       the bar shows torrent parse progress; after cold-boot it collapses
+       to a thin "Live" tick.
+    2. *Services* -- a small grid of cards (qBit, Radarr, Sonarr) each
+       carrying state, counts, and a ``data-ts`` timestamp so the client
+       can render "N s ago" relative to the browser clock.
+    3. *Activity log* -- the rolling tail of human-readable events the
+       pollers append, capped at :data:`_ACTIVITY_LOG_MAX` lines.
+    """
+    total = store.cold_boot_total
+    done = store.cold_boot_processed
+
+    arr = store.arr
+    arr_configured = arr is not None and arr.configured
+    radarr_configured = arr is not None and bool(arr.radarr_url)
+    sonarr_configured = arr is not None and bool(arr.sonarr_url)
+
+    qbit_card = _render_qbit_service_card(store)
+    radarr_card = (
+        _render_arr_service_card(
+            name="Radarr",
+            ok=arr.radarr_ok if arr else False,
+            last_fetch_at=arr.radarr_last_fetch_at if arr else 0.0,
+            last_err=arr.radarr_last_err if arr else "",
+            library_count=len(arr.movies_by_id) if arr else 0,
+            library_label="movies",
+            queue_count=arr.radarr_queue_count if arr else 0,
+            match_count=arr.radarr_match_count if arr else 0,
+            url=arr.radarr_url if arr else "",
+            fetch_cycles=arr.arr_fetch_cycles if arr else 0,
+        )
+        if radarr_configured
+        else ""
+    )
+    sonarr_card = (
+        _render_arr_service_card(
+            name="Sonarr",
+            ok=arr.sonarr_ok if arr else False,
+            last_fetch_at=arr.sonarr_last_fetch_at if arr else 0.0,
+            last_err=arr.sonarr_last_err if arr else "",
+            library_count=len(arr.series_by_id) if arr else 0,
+            library_label="series",
+            queue_count=arr.sonarr_queue_count if arr else 0,
+            match_count=arr.sonarr_match_count if arr else 0,
+            url=arr.sonarr_url if arr else "",
+            fetch_cycles=arr.arr_fetch_cycles if arr else 0,
+        )
+        if sonarr_configured
+        else ""
+    )
+    services_html = qbit_card + radarr_card + sonarr_card
+
+    # Overall widget state. qBit failure dominates ("system isn't working");
+    # cold-boot is active; arr-only failure stays "done" with a degraded
+    # badge inside the card so the headline doesn't scream red.
+    arr_degraded = arr_configured and (
+        (radarr_configured and arr is not None and not arr.radarr_ok)
+        or (sonarr_configured and arr is not None and not arr.sonarr_ok)
+    )
+
+    if not store.qbit_connected and store.qbit_last_error:
+        state = "stalled"
+        pct = 100
+        label = "qBittorrent unreachable"
+        pct_text = "X"
+        summary = (
+            f"qBittorrent at {store.qbit_host} is unreachable -- "
+            f"{store.qbit_last_error}"
+        )
+        bar_visible = False
+    elif not store.cold_boot_done and total <= 0:
+        # Pre-chunk: qBit hasn't responded yet (or the reconciler hasn't
+        # stamped a total). Show a low indeterminate-ish bar so the user
+        # has feedback that the system is reaching out -- not "Idle".
+        state = "active"
+        pct = 5
+        label = "Contacting qBittorrent"
+        pct_text = ""
+        summary = "Waiting for first response from qBittorrent"
+        bar_visible = True
+    elif not store.cold_boot_done:
+        state = "active"
+        pct = min(99, int(100 * done / total)) if total else 0
+        label = f"Loading {pct}%"
+        pct_text = f"{pct}%"
+        summary = f"Parsing torrents -- {done} of {total}"
+        bar_visible = True
+    else:
+        state = "done"
+        pct = 100
+        if arr_degraded:
+            label = "Live (arr degraded)"
+            pct_text = "!"
+        else:
+            label = "Live"
+            pct_text = "OK"
+        summary = (
+            f"{len(store.torrents)} torrents in {len(store.groups)} groups -- "
+            f"streaming live updates"
+        )
+        bar_visible = False
+
+    log_html = "".join(
+        f"<li>{html_lib.escape(line)}</li>"
+        for line in store.cold_boot_log[-_ACTIVITY_LOG_MAX:]
+    )
+    if not log_html:
+        log_html = '<li class="qf-activity-log-empty">No recent activity</li>'
+
+    bar_html = (
+        '<div class="qf-activity-bar">'
+        f'<div class="qf-activity-bar-fill" style="width:{pct}%"></div>'
+        '</div>'
+        if bar_visible
+        else ""
+    )
+
+    return (
+        f'<div id="qf-activity" class="qf-activity" '
+        f'data-state="{state}" data-open="false" '
+        f'hx-swap-oob="outerHTML">'
+        f'<button id="qf-activity-btn" type="button" '
+        f'class="qf-activity-btn" aria-haspopup="dialog" '
+        f'aria-expanded="false" aria-controls="qf-activity-panel" '
+        f'title="{html_lib.escape(summary)}">'
+        f'<span class="qf-activity-pulse" aria-hidden="true"></span>'
+        f'<span class="qf-activity-button-label">{html_lib.escape(label)}</span>'
+        f'</button>'
+        f'<div id="qf-activity-panel" class="qf-activity-panel" '
+        f'role="dialog" aria-label="Background activity" aria-hidden="true">'
+        f'<div class="qf-activity-head">'
+        f'<span class="qf-activity-title">Background activity</span>'
+        f'<span class="qf-activity-pct">{html_lib.escape(pct_text)}</span>'
+        f'</div>'
+        f'<div class="qf-activity-summary">{html_lib.escape(summary)}</div>'
+        f'{bar_html}'
+        f'<div class="qf-activity-services">{services_html}</div>'
+        f'<ol class="qf-activity-log">{log_html}</ol>'
+        f'</div>'
+        f'</div>'
+    )
+
+
+def _render_qbit_service_card(store: Store) -> str:
+    """Service card for the qBit poll loop.
+
+    Three terminal states:
+    - ``connecting``: app just started, no successful poll yet
+    - ``ok``: recent successful poll within :data:`_QBIT_STALE_AFTER`
+    - ``stalled``: connected but no recent poll (or never connected)
+    """
+    if not store.qbit_connected:
+        if store.qbit_last_error:
+            state = "down"
+            detail = (
+                f"<span class=\"qf-service-err\">"
+                f"{html_lib.escape(store.qbit_last_error)}</span>"
+            )
+        else:
+            state = "connecting"
+            detail = "Authenticating..."
+        return _service_card_html(
+            slug="qbit",
+            name="qBittorrent",
+            state=state,
+            primary=detail,
+            secondary=html_lib.escape(store.qbit_host or ""),
+            ts=0.0,
+            ts_prefix="",
+        )
+    if store.qbit_poll_count == 0 or store.qbit_last_poll_at == 0:
+        # Connected but the first poll hasn't returned yet -- carry the
+        # auth-bypass milestone into the card so the user sees forward
+        # motion even before sync/maindata responds.
+        return _service_card_html(
+            slug="qbit",
+            name="qBittorrent",
+            state="connecting",
+            primary="Waiting for sync/maindata...",
+            secondary=html_lib.escape(store.qbit_host or ""),
+            ts=0.0,
+            ts_prefix="",
+        )
+    fresh = (time.time() - store.qbit_last_poll_at) <= _QBIT_STALE_AFTER
+    state = "ok" if fresh else "stale"
+    primary = (
+        f"<strong>{len(store.torrents)}</strong> torrents "
+        f"&middot; <strong>{len(store.groups)}</strong> groups"
+    )
+    secondary = (
+        f"{store.qbit_poll_count} polls"
+        + (f" &middot; {html_lib.escape(store.qbit_host)}" if store.qbit_host else "")
+    )
+    return _service_card_html(
+        slug="qbit",
+        name="qBittorrent",
+        state=state,
+        primary=primary,
+        secondary=secondary,
+        ts=store.qbit_last_poll_at,
+        ts_prefix="last poll",
+    )
+
+
+def _render_arr_service_card(
+    *,
+    name: str,
+    ok: bool,
+    last_fetch_at: float,
+    last_err: str,
+    library_count: int,
+    library_label: str,
+    queue_count: int,
+    match_count: int,
+    url: str,
+    fetch_cycles: int,
+) -> str:
+    """Service card for a single arr instance (Radarr or Sonarr).
+
+    State precedence: ``down`` (last fetch raised) beats ``stale`` (last
+    fetch succeeded but is older than :data:`_ARR_STALE_AFTER`) beats
+    ``ok`` (recent successful fetch). ``connecting`` covers the gap
+    between task spin-up and the first fetch returning.
+    """
+    if fetch_cycles == 0 and last_fetch_at == 0:
+        state = "connecting"
+        primary = "Fetching library..."
+        secondary = html_lib.escape(url) if url else ""
+        ts = 0.0
+    elif not ok:
+        state = "down"
+        primary = (
+            f"<span class=\"qf-service-err\">"
+            f"{html_lib.escape(last_err or 'unreachable')}</span>"
+        )
+        secondary = (
+            "last good fetch shown above"
+            if last_fetch_at > 0
+            else (html_lib.escape(url) if url else "")
+        )
+        ts = last_fetch_at
+    else:
+        fresh = (time.time() - last_fetch_at) <= _ARR_STALE_AFTER if last_fetch_at else False
+        state = "ok" if fresh else "stale"
+        primary = (
+            f"<strong>{library_count}</strong> {library_label} "
+            f"&middot; <strong>{queue_count}</strong> queued"
+        )
+        secondary = (
+            f"<strong>{match_count}</strong> linked torrents"
+            if match_count
+            else "no linked torrents yet"
+        )
+        ts = last_fetch_at
+    return _service_card_html(
+        slug=name.lower(),
+        name=name,
+        state=state,
+        primary=primary,
+        secondary=secondary,
+        ts=ts,
+        ts_prefix="last fetch",
+    )
+
+
+def _service_card_html(
+    *,
+    slug: str,
+    name: str,
+    state: str,
+    primary: str,
+    secondary: str,
+    ts: float,
+    ts_prefix: str,
+) -> str:
+    """Build one ``.qf-service`` card.
+
+    ``primary`` / ``secondary`` are already-escaped HTML fragments -- the
+    caller is responsible for escaping any user-supplied substrings. The
+    timestamp is emitted as ``data-ts`` (unix seconds) so the client-side
+    formatter can render relative time against the browser's clock; the
+    server inlines a fallback string for clients without JS.
+    """
+    if ts > 0:
+        rel_fallback = _format_relative_seconds(time.time() - ts)
+        ts_html = (
+            f'<span class="qf-service-ts" data-ts="{ts:.0f}" '
+            f'data-prefix="{html_lib.escape(ts_prefix)}">'
+            f'{html_lib.escape(ts_prefix)} {html_lib.escape(rel_fallback)}'
+            f'</span>'
+        )
+    else:
+        ts_html = '<span class="qf-service-ts" data-ts="0"></span>'
+    return (
+        f'<div class="qf-service" data-service="{slug}" data-state="{state}">'
+        f'<div class="qf-service-head">'
+        f'<span class="qf-service-dot" aria-hidden="true"></span>'
+        f'<span class="qf-service-name">{html_lib.escape(name)}</span>'
+        f'<span class="qf-service-state">{html_lib.escape(_state_label(state))}</span>'
+        f'</div>'
+        f'<div class="qf-service-primary">{primary}</div>'
+        f'<div class="qf-service-meta">{secondary} {ts_html}</div>'
+        f'</div>'
+    )
+
+
+_STATE_LABELS = {
+    "ok": "Live",
+    "stale": "Stale",
+    "stalled": "Stalled",
+    "down": "Down",
+    "connecting": "Connecting",
+    "idle": "Idle",
+}
+
+
+def _state_label(state: str) -> str:
+    return _STATE_LABELS.get(state, state.title())
+
+
+def _format_relative_seconds(delta: float) -> str:
+    """Coarse human-readable elapsed string used as a no-JS fallback."""
+    if delta < 0:
+        return "just now"
+    if delta < 2:
+        return "just now"
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta / 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta / 3600)}h ago"
+    return f"{int(delta / 86400)}d ago"
+
+
 def _render_event_batch_iter(
     request: Request,
     store: Store,
@@ -799,12 +1168,14 @@ def _render_event_batch_iter(
     """
     has_resync = any(e.kind == EventKind.RESYNC for e in events)
     has_partial = any(e.kind == EventKind.RESYNC_PARTIAL for e in events)
-    # Drop any RESYNC/RESYNC_PARTIAL when the store has no torrents yet --
-    # emitting a snapshot payload against an empty store would wipe the
-    # client-side "Loading torrent list..." progress UI. The reconciler's
-    # first chunk lands data BEFORE its first RESYNC_PARTIAL fires, so this
-    # only affects the synthetic connect-time RESYNC.
+    # Empty-store RESYNC: ship only the activity widget update so log lines
+    # added by arr_fetch_loop (which runs before qBit responds) reach the
+    # user, without wiping #groups -- the server-side chrome already left
+    # it as the loading affordance. The reconciler's first chunk publishes
+    # a fresh RESYNC_PARTIAL with non-empty store, which takes the normal
+    # batched path below.
     if (has_resync or has_partial) and not store.torrents:
+        yield _esc_for_sse(_render_activity_oob(store))
         events = [
             e for e in events
             if e.kind not in (EventKind.RESYNC, EventKind.RESYNC_PARTIAL)
@@ -860,8 +1231,9 @@ def _emit_resync_batches(
       for this batch. The client moves children into ``#groups`` with a
       replace-or-append heuristic so warm RESYNCs swap in-place and cold
       RESYNCs append in sorted order.
-    - ``#qf-load-progress`` (OOB innerHTML) carrying the visible progress
-      block. Empty on the final batch of the final RESYNC so CSS hides it.
+    - ``#qf-activity`` (OOB outerHTML, first batch only) carrying the
+      header activity widget update -- bar pct, status label, log lines.
+      The state machine lives in :func:`_render_activity_oob`.
     - Chrome OOBs (``#active-filters``, ``#filter-facets``) on the first
       batch so headline counts update with the snapshot.
 
@@ -891,15 +1263,18 @@ def _emit_resync_batches(
         f'<div id="rule-bar-slot" hx-swap-oob="innerHTML">{rule_bar_html}</div>'
     )
 
+    activity_oob = _render_activity_oob(store)
+
     if total == 0:
         if not is_final:
             # Partial RESYNC fired before any visible groups exist. Skip --
             # the next partial / final will deliver content. Keep the
-            # client-side loading placeholder visible.
+            # header activity widget visible (the user can still peek
+            # into the dropdown to see what's happening).
             return
-        # Filter excludes everything (or store empty). Wipe #groups, remove
-        # any in-flight progress UI, and let the empty-state template render
-        # if the store has any torrents at all.
+        # Filter excludes everything (or store empty). Wipe #groups and
+        # let the empty-state template render if the store has any
+        # torrents at all. The activity widget is updated either way.
         empty_html = ""
         if store.torrents:
             empty_html = render.render_groups_payload(
@@ -910,19 +1285,13 @@ def _emit_resync_batches(
             f'<div id="qf-batch-staging" hx-swap-oob="outerHTML" '
             f'data-final="1" data-canonical="" data-loaded="0" '
             f'data-total="0" hidden></div>'
-            f'<div id="qf-load-progress" hx-swap-oob="innerHTML"></div>'
+            + activity_oob
             + chrome_oobs
         )
         yield _esc_for_sse(payload)
         return
 
     canonical_slugs = "|".join(g.key.slug() for g in visible)
-    header = (
-        f"Connected -- {total} groups incoming"
-        if is_final
-        else f"Connected -- {total} groups so far"
-    )
-    log_lines: list[str] = [header]
 
     idx = 0
     batch_n = 0
@@ -947,7 +1316,7 @@ def _emit_resync_batches(
                 torrents_for_group(store, g.key, fs),
                 store=store,
                 rule_marks=rule_marks.get(g.key, {}),
-                rule_keeper=rule_keepers.get(g.key, ""),
+                rule_keepers=rule_keepers.get(g.key, frozenset()),
                 rule_factors=rule_factors.get(g.key, {}),
                 rule_severity=rule_severity.get(g.key, {}),
             )
@@ -963,41 +1332,13 @@ def _emit_resync_batches(
             f'</div>'
         )
 
-        log_lines.append(f"Loaded {end} of {total} groups")
-
-        if carries_final_flag:
-            # Empty inner content -> CSS :empty hides the block.
-            progress = (
-                '<div id="qf-load-progress" hx-swap-oob="innerHTML"></div>'
-            )
-        else:
-            # Within-emission percentage. For partial RESYNCs the
-            # eventual total is unknown, so cap the visual at 95 % so
-            # the bar doesn't briefly read "done" between chunks.
-            raw_pct = int(100 * end / total) if total else 0
-            pct = raw_pct if is_final else min(95, raw_pct)
-            label = (
-                f"Loading torrent list -- {end} of {total} groups"
-                if is_final
-                else f"Loading torrent list -- {end} groups so far"
-            )
-            log_html = "".join(
-                f"<li>{line}</li>" for line in log_lines
-            )
-            progress = (
-                f'<div id="qf-load-progress" hx-swap-oob="innerHTML">'
-                f'<div class="fl-card" role="status" aria-live="polite">'
-                f'<div class="fl-title">{label}</div>'
-                f'<div class="fl-bar">'
-                f'<div class="fl-bar-fill" style="width:{pct}%"></div>'
-                f'</div>'
-                f'<ol class="fl-log">{log_html}</ol>'
-                f'</div>'
-                f'</div>'
-            )
-
-        parts = [staging, progress]
+        parts = [staging]
+        # Activity widget + chrome only on the first batch of a partial.
+        # The store fields ``activity_oob`` reads from don't change while
+        # we're inside one _emit_resync_batches call, so re-emitting per
+        # batch would just churn bytes for the same payload.
         if is_first:
+            parts.append(activity_oob)
             parts.append(chrome_oobs)
 
         yield _esc_for_sse("".join(parts))
@@ -1142,7 +1483,7 @@ def _render_delta_events(
             _torrents(gk),
             store=store,
             rule_marks=rule_marks.get(gk, {}),
-            rule_keeper=rule_keepers.get(gk, ""),
+            rule_keepers=rule_keepers.get(gk, frozenset()),
             rule_factors=rule_factors.get(gk, {}),
             rule_severity=rule_severity.get(gk, {}),
         )
@@ -1172,7 +1513,7 @@ def _render_delta_events(
             torrents,
             store=store,
             rule_marks=rule_marks.get(gk, {}),
-            rule_keeper=rule_keepers.get(gk, ""),
+            rule_keepers=rule_keepers.get(gk, frozenset()),
             rule_factors=rule_factors.get(gk, {}),
             rule_severity=rule_severity.get(gk, {}),
         )

@@ -54,6 +54,315 @@ button { font: inherit; cursor: pointer; }
 .app-bar .live.disconnected::before { background: var(--danger); }
 .app-bar .spacer { flex: 1; }
 
+/* =========================================================================
+   Header activity widget. Plex-style "what's the system doing right now"
+   chip in the app-bar. Always visible -- idle is a muted gray dot, active
+   is the accent color with a pulsing ring and a percentage label, done is
+   a green tick. Click the chip to expand the dropdown panel which carries
+   the bar, summary, and the running activity log.
+
+   The server (web/routes.py:_render_activity_oob) rewrites this widget's
+   outerHTML on every RESYNC; keys.js owns the panel open state and
+   re-applies it after every swap.
+   ========================================================================= */
+.qf-activity {
+  position: relative;
+}
+.qf-activity-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.01em;
+  transition: border-color var(--motion-fast) var(--ease-out),
+              color var(--motion-fast) var(--ease-out),
+              background var(--motion-fast) var(--ease-out);
+}
+.qf-activity-btn:hover,
+.qf-activity-btn:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+.qf-activity-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex-shrink: 0;
+  position: relative;
+}
+.qf-activity[data-state="active"] .qf-activity-pulse {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--accent);
+  animation: qf-activity-pulse 1.4s var(--ease-out) infinite;
+}
+.qf-activity[data-state="done"] .qf-activity-pulse { background: var(--success); }
+.qf-activity[data-state="stalled"] .qf-activity-pulse { background: var(--danger); }
+.qf-activity[data-state="active"] .qf-activity-btn { color: var(--accent); border-color: var(--accent); }
+.qf-activity[data-state="stalled"] .qf-activity-btn { color: var(--danger); border-color: var(--danger); }
+@keyframes qf-activity-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(94, 106, 210, 0.55); }
+  70%  { box-shadow: 0 0 0 6px rgba(94, 106, 210, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(94, 106, 210, 0); }
+}
+
+/* Dropdown panel. Anchored under the button on the right edge so it
+   never spills off-viewport. Visibility is data-attribute driven (not
+   the ``hidden`` attribute) so the panel can slide+fade in/out via
+   transform+opacity instead of snapping. transform-origin anchored
+   to top-right gives the panel a spatial relationship to its trigger
+   button. Closed-state ``pointer-events: none`` + ``visibility: hidden``
+   (delayed) keeps the panel out of hit-testing and tab order. */
+.qf-activity-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(420px, 90vw);
+  max-height: 60vh;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  transform-origin: top right;
+  transform: translateY(-8px) scale(0.97);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 140ms cubic-bezier(0.4, 0, 1, 1),
+    transform 140ms cubic-bezier(0.4, 0, 1, 1),
+    visibility 0s linear 140ms;
+}
+.qf-activity[data-open="true"] .qf-activity-panel {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out),
+    visibility 0s linear 0s;
+}
+.qf-activity-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.qf-activity-title {
+  font-family: var(--font-sans);
+  font-size: var(--t-md);
+  color: var(--fg);
+  font-weight: 600;
+}
+.qf-activity-pct {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+}
+.qf-activity[data-state="active"] .qf-activity-pct { color: var(--accent); }
+.qf-activity[data-state="done"] .qf-activity-pct   { color: var(--success); }
+.qf-activity-summary {
+  font-family: var(--font-sans);
+  font-size: var(--t-sm);
+  color: var(--fg-muted);
+}
+.qf-activity-bar {
+  height: 4px;
+  background: var(--bg-base);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.qf-activity-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width var(--motion-slow) var(--ease-out);
+}
+.qf-activity[data-state="done"] .qf-activity-bar-fill    { background: var(--success); }
+.qf-activity[data-state="stalled"] .qf-activity-bar-fill { background: var(--danger); }
+
+/* Services grid -- one row per configured backend (qBit, Radarr, Sonarr).
+   The grid auto-collapses when arr isn't configured because the renderer
+   only emits cards for services with a URL set. Empty grid is hidden so
+   the panel doesn't carry a dead gap. */
+.qf-activity-services {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qf-activity-services:empty { display: none; }
+.qf-service {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  padding: 8px 10px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--fg-muted);
+  border-radius: var(--radius-sm);
+  font-size: var(--t-xs);
+}
+.qf-service[data-state="ok"]         { border-left-color: var(--success); }
+.qf-service[data-state="stale"]      { border-left-color: var(--accent); }
+.qf-service[data-state="connecting"] { border-left-color: var(--accent); }
+.qf-service[data-state="down"]       { border-left-color: var(--danger); }
+.qf-service[data-state="stalled"]    { border-left-color: var(--danger); }
+.qf-service-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.qf-service-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex-shrink: 0;
+}
+.qf-service[data-state="ok"]         .qf-service-dot { background: var(--success); }
+.qf-service[data-state="stale"]      .qf-service-dot { background: var(--accent); }
+.qf-service[data-state="connecting"] .qf-service-dot {
+  background: var(--accent);
+  animation: qf-activity-pulse 1.4s var(--ease-out) infinite;
+}
+.qf-service[data-state="down"]       .qf-service-dot { background: var(--danger); }
+.qf-service[data-state="stalled"]    .qf-service-dot { background: var(--danger); }
+.qf-service-name {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  color: var(--fg);
+  font-size: var(--t-sm);
+}
+.qf-service-state {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.qf-service[data-state="ok"]         .qf-service-state { color: var(--success); border-color: color-mix(in oklch, var(--success) 50%, transparent); }
+.qf-service[data-state="stale"]      .qf-service-state { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 50%, transparent); }
+.qf-service[data-state="connecting"] .qf-service-state { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 50%, transparent); }
+.qf-service[data-state="down"]       .qf-service-state { color: var(--danger); border-color: color-mix(in oklch, var(--danger) 50%, transparent); }
+.qf-service[data-state="stalled"]    .qf-service-state { color: var(--danger); border-color: color-mix(in oklch, var(--danger) 50%, transparent); }
+.qf-service-primary {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  color: var(--fg);
+  font-size: var(--t-xs);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.qf-service-primary strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+.qf-service-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+.qf-service-ts {
+  text-align: right;
+  white-space: nowrap;
+}
+.qf-service-err {
+  color: var(--danger);
+}
+/* Log box. Explicit ``padding-inline-start: 0`` overrides the user-agent
+   default (40px on <ol>) which would otherwise indent the entries past
+   the left edge, making the start of long lines look clipped against
+   the panel border -- the "starts from out of screen" symptom.
+
+   Entries wrap to two lines max with word-break so a long line like
+   "Linked 412 torrents to Radarr/Sonarr (1430 movies, 380 series)"
+   stays fully readable instead of truncating mid-word with an
+   ellipsis. The ``> `` prefix lives inside each <li>'s padding via
+   ::before so wrapped second lines hang-indent under the text, not
+   under the prefix. */
+.qf-activity-log {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  padding-inline-start: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  scroll-behavior: smooth;
+}
+.qf-activity-log li {
+  position: relative;
+  padding: 4px 0 4px 18px;
+  line-height: 1.45;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.qf-activity-log li + li {
+  border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+}
+.qf-activity-log li::before {
+  content: '>';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.qf-activity-log li.qf-activity-log-empty {
+  color: var(--fg-muted);
+  font-style: italic;
+  -webkit-line-clamp: unset;
+}
+.qf-activity-log li.qf-activity-log-empty::before { content: ''; }
+
+/* Respect a user who has asked the system for less motion. Disables
+   the pulse, panel transition, and bar-fill width animation. The panel
+   still opens and closes -- just instantly, without movement. */
+@media (prefers-reduced-motion: reduce) {
+  .qf-activity-panel,
+  .qf-activity[data-open="true"] .qf-activity-panel,
+  .qf-activity-bar-fill,
+  .qf-activity[data-state="active"] .qf-activity-pulse {
+    transition: none;
+    animation: none;
+  }
+}
+
 /* Layout shell */
 .shell {
   display: grid;
@@ -206,76 +515,6 @@ button { font: inherit; cursor: pointer; }
   gap: 4px;
   padding: 4px 0 8px;
 }
-
-/* Batched-RESYNC progress block. Sits as a sibling AFTER #groups so it
-   naturally rides below the last rendered card. Hidden when empty so the
-   final batch (which sends empty inner HTML) removes the block without
-   needing a separate "remove" message. */
-.qf-load-progress {
-  padding: 16px 0;
-  transition: opacity var(--motion-base) var(--ease-out);
-}
-.qf-load-progress:empty {
-  display: none;
-}
-/* .fl-* class names live inside .qf-load-progress. Server emits them in
-   _emit_resync_batches and the client placeholder uses the same markup
-   via buildFlCard() in keys.js. */
-.fl-card {
-  max-width: 520px;
-  margin: 0 auto;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 18px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.fl-title {
-  font-family: var(--font-sans);
-  font-size: var(--t-md);
-  color: var(--fg);
-  letter-spacing: 0.01em;
-}
-.fl-bar {
-  height: 4px;
-  background: var(--bg-base);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.fl-bar-fill {
-  height: 100%;
-  width: 0%;
-  background: var(--accent);
-  transition: width var(--motion-slow) var(--ease-out);
-}
-.fl-log {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 140px;
-  overflow-y: auto;
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  color: var(--fg-muted);
-  background: var(--bg-base);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-}
-.fl-log li {
-  padding: 2px 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.fl-log li::before {
-  content: '> ';
-  color: var(--accent);
-}
-.fl-log li.err { color: var(--danger); }
-.fl-log li.err::before { color: var(--danger); }
 
 /* Toggle pill (multi-torrent) */
 .toggle-row {

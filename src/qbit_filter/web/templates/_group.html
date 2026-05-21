@@ -4,7 +4,10 @@
      torrents           list[Torrent] (already ordered: best quality first)
      seasons            list[int] (TV only; empty for movies)
      rule_marks         dict[str, str]  -- {torrent_hash: reason}; optional
-     rule_keeper        str             -- keeper hash (Bundle 1); optional
+     rule_keepers       frozenset[str]  -- keeper hashes; set so multi-season
+                                            TV groups can surface one keeper
+                                            per season. Empty when the rule
+                                            has no keeper opinion.
      rule_factors       dict[str, tuple[ReasonFactor, ...]]; optional
      rule_severity      dict[str, str]  -- {torrent_hash: "warning"}; optional
      arr_meta           ArrMatch | None -- arr-derived metadata for the group; optional
@@ -70,14 +73,16 @@
     {% endif %}
   </div>
   {# Compare strip kicks in only when a rule preview marked one or more rows
-     AND the rule named a keeper. Otherwise fall back to the flat row stack
-     (preserves the non-preview view 1:1). #}
-  {% set _keeper_hash = rule_keeper | default('') %}
-  {% set _use_compare = marked_in_group and _keeper_hash %}
+     AND the rule named at least one keeper. Otherwise fall back to the flat
+     row stack (preserves the non-preview view 1:1). For multi-season TV
+     groups the rule emits one keeper per season; the compare strip lists
+     all of them in the KEEPER column. #}
+  {% set _keeper_hashes = rule_keepers | default([]) %}
+  {% set _use_compare = marked_in_group and _keeper_hashes %}
   {% if _use_compare %}
-    {% set keeper = (torrents | selectattr('hash', 'equalto', _keeper_hash) | list | first) %}
+    {% set keepers = torrents | selectattr('hash', 'in', _keeper_hashes | list) | list %}
     {% set flagged = torrents | selectattr('hash', 'in', marked_in_group.keys()) | list %}
-    {% if keeper and flagged %}
+    {% if keepers and flagged %}
       <div class="group-rows compare-host" id="group-{{ group.key.slug() }}-rows">
         {% include '_compare_strip.html' with context %}
       </div>
@@ -88,7 +93,7 @@
           {% set marked = reason is not none %}
           {% set factors = (rule_factors | default({})).get(t.hash, ()) %}
           {% set severity = (rule_severity | default({})).get(t.hash, '') %}
-          {% set is_keeper = t.hash == _keeper_hash %}
+          {% set is_keeper = t.hash in _keeper_hashes %}
           {% set pre_check = _pre_check_flagged and marked %}
           {% include '_torrent.html' with context %}
         {% endfor %}
@@ -100,7 +105,7 @@
         {% set reason = (rule_marks | default({})).get(t.hash) %}
         {% set marked = reason is not none %}
         {% set factors = (rule_factors | default({})).get(t.hash, ()) %}
-        {% set is_keeper = t.hash == _keeper_hash %}
+        {% set is_keeper = t.hash in _keeper_hashes %}
         {% set pre_check = _pre_check_flagged and marked %}
         {% include '_torrent.html' with context %}
       {% endfor %}

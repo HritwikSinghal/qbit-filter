@@ -15,14 +15,14 @@
   });
 
   /* =========================================================================
-     Batched-RESYNC load progress.
+     Batched-RESYNC stream + header activity widget.
 
      Server emits the initial RESYNC as a sequence of SSE messages, each
      replacing #qf-batch-staging via hx-swap-oob="outerHTML" with a chunk of
-     rendered group cards plus a refreshed #qf-load-progress block. Below we:
+     rendered group cards plus a refreshed #qf-activity block. Below we:
 
-     1. Set a "Connecting..." placeholder if there's no card yet, so the user
-        sees feedback while the first batch is in flight.
+     1. Stamp a one-shot "Stream not responding" fallback into the header
+        activity widget if no SSE message has arrived in 30 s.
      2. Watch #qf-batch-staging swaps and move its children into #groups
         (replace if id exists, append otherwise). On the final batch, prune
         any DOM cards no longer in the canonical slug list.
@@ -30,60 +30,125 @@
         target=#groups so existing listeners (selection re-apply, viewport
         observer, marked-row scan) treat it like a real #groups-targeted
         swap.
+     4. Re-apply the activity panel's open/close state after the server's
+        outerHTML swap of #qf-activity, so a user who clicked the button
+        doesn't see the panel snap shut on every RESYNC.
      ========================================================================= */
-  function buildFlCard(titleText, fillPct) {
-    /* DOM construction (no innerHTML) for the "Connecting..." placeholder
-       so the static-analysis hook doesn't flag this site. The server-side
-       progress block uses identical class names and is rendered server-side
-       in Jinja; this matches that markup. */
-    const card = document.createElement('div');
-    card.className = 'fl-card';
-    card.setAttribute('role', 'status');
-    card.setAttribute('aria-live', 'polite');
-    const title = document.createElement('div');
-    title.className = 'fl-title';
-    title.textContent = titleText;
-    const bar = document.createElement('div');
-    bar.className = 'fl-bar';
-    const fill = document.createElement('div');
-    fill.className = 'fl-bar-fill';
-    fill.style.width = fillPct + '%';
-    bar.appendChild(fill);
-    card.append(title, bar);
-    return card;
+
+  /* Stale-stream guard. The server-rendered chrome ships with the activity
+     widget already in "active" state; if no SSE message lands within 30 s,
+     surface that in the panel summary so the user has a hint instead of
+     staring at an indeterminate bar. Cleared once any SSE message arrives. */
+  let stalePaintTimer = setTimeout(() => {
+    const summary = document.querySelector('#qf-activity-panel .qf-activity-summary');
+    const label = document.querySelector('#qf-activity-btn .qf-activity-button-label');
+    const widget = document.getElementById('qf-activity');
+    if (widget) widget.setAttribute('data-state', 'stalled');
+    if (label) label.textContent = 'Stream not responding';
+    if (summary) summary.textContent = 'No SSE message received in 30 s -- check the server';
+  }, 30000);
+  document.body.addEventListener('htmx:sseMessage', () => {
+    if (stalePaintTimer) { clearTimeout(stalePaintTimer); stalePaintTimer = null; }
+  });
+
+  /* Activity panel toggle. The server rewrites #qf-activity outerHTML on
+     every RESYNC, which drops aria-expanded / hidden / data-open back to
+     their defaults. We hold the open state in JS and re-apply it after
+     each swap so the panel survives background updates. */
+  let activityPanelOpen = false;
+
+  function applyActivityPanelState(opts) {
+    const widget = document.getElementById('qf-activity');
+    const btn = document.getElementById('qf-activity-btn');
+    const panel = document.getElementById('qf-activity-panel');
+    if (!widget || !btn || !panel) return;
+    /* Visibility is CSS-driven via [data-open] on the widget so the
+       panel can animate via transform+opacity. We only manage the
+       data attribute + ARIA state here; the ``hidden`` attribute is
+       NOT used because it would short-circuit the CSS transition.
+
+       ``animate: false`` is passed by the post-SSE-swap re-apply
+       path: the server re-renders the widget with data-open="false",
+       so without suppressing transitions the panel would visibly
+       re-open on every chunk. We disable the transition for one
+       frame, set the state, force reflow, then restore. */
+    const animate = !opts || opts.animate !== false;
+    if (!animate) {
+      panel.style.transition = 'none';
+    }
+    widget.setAttribute('data-open', activityPanelOpen ? 'true' : 'false');
+    btn.setAttribute('aria-expanded', activityPanelOpen ? 'true' : 'false');
+    panel.setAttribute('aria-hidden', activityPanelOpen ? 'false' : 'true');
+    if (!animate) {
+      // Force layout flush so the no-transition style is committed
+      // before we restore the original CSS-driven transition.
+      void panel.offsetHeight;
+      panel.style.transition = '';
+    }
   }
 
-  function setupLoadProgress() {
-    const groups = document.getElementById('groups');
-    const progress = document.getElementById('qf-load-progress');
-    if (!groups || !progress) {
-      if (setupLoadProgress._r === undefined) setupLoadProgress._r = 0;
-      if (setupLoadProgress._r++ > 200) return;
-      requestAnimationFrame(setupLoadProgress);
+  function setActivityPanel(open) {
+    activityPanelOpen = !!open;
+    applyActivityPanelState({ animate: true });
+  }
+
+  /* Click-to-toggle on the button. Anywhere else (or Esc) closes. */
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    if (t.closest('#qf-activity-btn')) {
+      e.preventDefault();
+      setActivityPanel(!activityPanelOpen);
       return;
     }
-    /* If a card is already present (warm boot -- the server streamed
-       groups directly into #groups because Store was non-empty at request
-       time), skip the "Loading" placeholder so the user isn't shown a
-       spinner over content they already have. */
-    if (groups.querySelector('.group-card')) return;
-    progress.replaceChildren(buildFlCard('Loading torrent list...', 5));
+    if (activityPanelOpen && !t.closest('#qf-activity-panel') && !t.closest('#qf-activity')) {
+      setActivityPanel(false);
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && activityPanelOpen) {
+      setActivityPanel(false);
+    }
+  });
+  /* htmx fires oobAfterSwap with target = the OOB'd element. When that's
+     #qf-activity (or a descendant in the new tree), re-apply our open
+     state. The swap drops listeners attached to the OLD button -- the
+     delegated document-click handler above keeps working because it
+     targets the id, not the element identity. */
+  document.body.addEventListener('htmx:oobAfterSwap', (e) => {
+    const target = e.detail && e.detail.target;
+    if (target && (target.id === 'qf-activity' || (target.closest && target.closest('#qf-activity')))) {
+      applyActivityPanelState();
+      refreshActivityTimestamps();
+    }
+  });
 
-    /* Safety: if nothing arrives in 30 s, surface a hint instead of
-       leaving the bar pinned at 5%. The first server batch will overwrite
-       this. */
-    setTimeout(() => {
-      if (!groups || groups.querySelector('.group-card')) return;
-      const card = document.createElement('div');
-      card.className = 'fl-card';
-      const t = document.createElement('div');
-      t.className = 'fl-title';
-      t.textContent = 'Stream not responding -- check server';
-      card.appendChild(t);
-      progress.replaceChildren(card);
-    }, 30000);
+  /* Relative-time refresher for the service cards inside the activity
+     panel. Each .qf-service-ts carries data-ts (unix seconds) and an
+     optional data-prefix ("last poll"); the server-rendered text is a
+     fallback for the moment before this tick fires. Running every 5 s
+     keeps "12s ago" / "2m ago" accurate without churning the DOM. */
+  function formatRelative(secAgo) {
+    if (!isFinite(secAgo) || secAgo < 0) return 'just now';
+    if (secAgo < 2) return 'just now';
+    if (secAgo < 60) return Math.floor(secAgo) + 's ago';
+    if (secAgo < 3600) return Math.floor(secAgo / 60) + 'm ago';
+    if (secAgo < 86400) return Math.floor(secAgo / 3600) + 'h ago';
+    return Math.floor(secAgo / 86400) + 'd ago';
   }
-  setupLoadProgress();
+  function refreshActivityTimestamps() {
+    const now = Date.now() / 1000;
+    const nodes = document.querySelectorAll('#qf-activity-panel .qf-service-ts');
+    for (const node of nodes) {
+      const ts = parseFloat(node.getAttribute('data-ts') || '0');
+      if (!ts) { node.textContent = ''; continue; }
+      const prefix = node.getAttribute('data-prefix') || '';
+      const rel = formatRelative(now - ts);
+      node.textContent = prefix ? prefix + ' ' + rel : rel;
+    }
+  }
+  refreshActivityTimestamps();
+  setInterval(refreshActivityTimestamps, 5000);
 
   /* Move the latest batch's cards from #qf-batch-staging into #groups. */
   function applyBatchStaging(staging) {

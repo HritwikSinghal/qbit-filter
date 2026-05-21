@@ -34,6 +34,25 @@ class ArrStore:
     sonarr_url: str = ""
     # Bumped on every snapshot rebuild. Independent from qBit ``Store.rid``.
     rid: int = 0
+    # Per-service sync telemetry surfaced by the background activity dialog.
+    # Mutated by the arr poller after each fetch cycle. Timestamps are wall
+    # clock (``time.time()``) so the browser can render "X ago" against its
+    # own clock. ``*_last_err`` is cleared on the next successful fetch.
+    # Counts are denormalised from the snapshot so the dialog doesn't have to
+    # walk every dict to summarise.
+    radarr_last_fetch_at: float = 0.0
+    sonarr_last_fetch_at: float = 0.0
+    radarr_last_err: str = ""
+    sonarr_last_err: str = ""
+    radarr_queue_count: int = 0
+    sonarr_queue_count: int = 0
+    radarr_history_count: int = 0
+    sonarr_history_count: int = 0
+    arr_fetch_cycles: int = 0
+    # Cumulative match counts from the most recent ``build_index`` -- the
+    # dialog shows this as the "Linked" number for each service.
+    radarr_match_count: int = 0
+    sonarr_match_count: int = 0
 
     @property
     def configured(self) -> bool:

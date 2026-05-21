@@ -12,8 +12,8 @@
     </button>
   {% else %}
     {# When ``total_torrents`` is 0 the streaming response skips this template
-       entirely and lets the batched-RESYNC progress block handle UX -- so
-       the only way we reach this branch is when the store has torrents but
+       entirely and lets the header activity widget handle UX -- so the
+       only way we reach this branch is when the store has torrents but
        none survived grouping (e.g. all in unmapped categories). #}
     <h6>No groups to show</h6>
     <p>

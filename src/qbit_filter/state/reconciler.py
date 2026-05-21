@@ -224,8 +224,9 @@ class Reconciler:
             # one-shot path because they're rarer and a streamed mid-session
             # rebuild would visibly flash the page.
             chunk_size = self.settings.qbit_cold_boot_chunk_size
+            is_cold_boot = self.store.rid == 0
             should_chunk = (
-                self.store.rid == 0
+                is_cold_boot
                 and chunk_size > 0
                 and len(delta.added) > chunk_size
             )
@@ -238,6 +239,13 @@ class Reconciler:
                 if names:
                     await asyncio.to_thread(_warm_parse_cache, names)
                 self._rebuild(delta)
+                if is_cold_boot:
+                    # One-shot cold boot (small library, didn't trip the
+                    # chunk threshold). Mark done so the SSE renderer drops
+                    # the progress block instead of leaving the placeholder.
+                    self.store.cold_boot_total = len(self.store.torrents)
+                    self.store.cold_boot_processed = len(self.store.torrents)
+                    self.store.cold_boot_done = True
             self.store.rid = delta.rid
             return
 
@@ -288,6 +296,20 @@ class Reconciler:
         self._transient_emit_at.clear()
         items = list(delta.added.items())
         total = len(items)
+        # Stamp the qBit total up-front so the SSE progress UI has a stable
+        # denominator. The bar then climbs monotonically across partials
+        # instead of resetting per chunk. Cleared on the final chunk so a
+        # subsequent reconnect-time RESYNC doesn't re-paint the progress
+        # block.
+        self.store.cold_boot_total = total
+        self.store.cold_boot_processed = 0
+        self.store.cold_boot_done = False
+        # Append rather than replace -- the qBit poller has already logged
+        # "Connecting to..." / "Connected" lines that the user needs to see
+        # alongside the chunked-parse progress.
+        self.store.cold_boot_log.append(
+            f"qBittorrent sync received -- {total} torrents incoming"
+        )
         idx = 0
         while idx < total:
             end = min(idx + chunk_size, total)
@@ -321,6 +343,20 @@ class Reconciler:
             self.store.rid += 1
             self.store.facet_cache = None
             is_final = end == total
+            self.store.cold_boot_processed = end
+            group_count = len(self.store.groups)
+            # Trim the log so the box stays compact (CSS max-height also
+            # caps it, but a short list keeps the SSE payload small).
+            self.store.cold_boot_log.append(
+                f"Parsed {end} of {total} torrents -> {group_count} groups"
+            )
+            if len(self.store.cold_boot_log) > 16:
+                del self.store.cold_boot_log[: len(self.store.cold_boot_log) - 16]
+            if is_final:
+                self.store.cold_boot_done = True
+                self.store.cold_boot_log.append(
+                    f"Cold boot complete -- {group_count} groups ready"
+                )
             kind = EventKind.RESYNC if is_final else EventKind.RESYNC_PARTIAL
             self.bus.publish(DomainEvent(kind=kind))
             idx = end

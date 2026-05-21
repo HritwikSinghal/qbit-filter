@@ -94,6 +94,8 @@ async def fetch_once(settings: Settings) -> ArrSnapshot:
         return ArrSnapshot(ok=False)
 
     snap = ArrSnapshot(ok=True)
+    snap.radarr_attempted = radarr_on
+    snap.sonarr_attempted = sonarr_on
     async with arr_client.make_client() as client:
         radarr_task: asyncio.Task[_RadarrFetch] | None = None
         sonarr_task: asyncio.Task[_SonarrFetch] | None = None
@@ -113,10 +115,13 @@ async def fetch_once(settings: Settings) -> ArrSnapshot:
                 snap.radarr_history = dict(r_history)
                 snap.quality_profiles_radarr = dict(r_profiles)
                 snap.radarr_tag_labels = dict(r_tags)
+                snap.radarr_fetched = True
             except arr_client.ArrUnavailable as exc:
                 logger.warning("arr fetch failed for radarr: %s", exc)
-            except Exception:
+                snap.radarr_error = str(exc)
+            except Exception as exc:
                 logger.exception("arr fetch raised unexpectedly for radarr")
+                snap.radarr_error = f"unexpected error: {exc}"
         if sonarr_task is not None:
             try:
                 series, s_queue, s_history, s_profiles, s_tags = await sonarr_task
@@ -125,10 +130,13 @@ async def fetch_once(settings: Settings) -> ArrSnapshot:
                 snap.sonarr_history = dict(s_history)
                 snap.quality_profiles_sonarr = dict(s_profiles)
                 snap.sonarr_tag_labels = dict(s_tags)
+                snap.sonarr_fetched = True
             except arr_client.ArrUnavailable as exc:
                 logger.warning("arr fetch failed for sonarr: %s", exc)
-            except Exception:
+                snap.sonarr_error = str(exc)
+            except Exception as exc:
                 logger.exception("arr fetch raised unexpectedly for sonarr")
+                snap.sonarr_error = f"unexpected error: {exc}"
     return snap
 
 
