@@ -47,8 +47,13 @@ Thumbs.db
 # Logs
 *.log
 
-# Captured qBit fixtures with potentially-real data
+# Captured qBit fixtures contain real tracker passkeys and library data.
+# Never commit. Regenerate locally via scripts/capture_fixtures.py; the
+# script writes to local_*.json by default so the safe path matches this
+# rule. If you ever produce a synthetic fixture for tests, name it without
+# the `local_` / `maindata_` prefixes.
 tests/fixtures/local_*.json
+tests/fixtures/maindata_*.json
 
 # Nix build outputs (used in phase 9)
 result
