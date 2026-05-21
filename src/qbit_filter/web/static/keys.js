@@ -300,14 +300,6 @@
     );
   }
 
-  document.body.addEventListener('htmx:oobAfterSwap', (e) => {
-    const t = e.detail && e.detail.target;
-    if (!t || t.id !== 'qf-batch-staging') return;
-    /* Defer to next frame so htmx's own bookkeeping for this swap finishes
-       before we mutate adjacent DOM. */
-    requestAnimationFrame(() => applyBatchStaging(t));
-  });
-
   /* =========================================================================
      Theme: simple dark (default) / light toggle. Dark is the token default;
      `body.light` flips the CSS custom properties to the light palette.
@@ -336,18 +328,39 @@
   });
 
   /* =========================================================================
-     Selection model + selection footer.
+     Selection model + visible-row caching.
 
      The DOM is rerendered piece-by-piece via SSE/HTMX. The source of truth is
      the in-memory `selection` map; after every relevant swap we re-paint
      checkboxes & data-marked attributes from it so selections survive
      partial re-renders.
-     ========================================================================= */
-  /* Map<hash, bytes>. Bytes are captured at check-time from the row's
+
+     Map<hash, bytes>. Bytes are captured at check-time from the row's
      data-bytes attribute so the footer can sum them without re-querying the
      DOM per selected hash. Avoids an O(N) `document.querySelector` storm on
-     every selection change when 100+ rows are selected. */
+     every selection change when 100+ rows are selected.
+     ========================================================================= */
   const selection = new Map();
+  let rangeAnchorHash = null;
+  let focusedRowEl = null;
+  let focusedHash = null;
+
+  /* Cached visible-row / -group arrays. Keyboard navigation (j/k/J/K/x/X/a)
+     used to walk all 1310 rows per keypress; one cache + targeted
+     invalidation drops that to one walk per real swap. */
+  let _rowsCache = null;
+  let _groupsCache = null;
+  function invalidateVisibleCache() { _rowsCache = null; _groupsCache = null; }
+  function visibleRows() {
+    if (_rowsCache) return _rowsCache;
+    _rowsCache = Array.from(document.querySelectorAll('#groups .torrent-row'));
+    return _rowsCache;
+  }
+  function visibleGroups() {
+    if (_groupsCache) return _groupsCache;
+    _groupsCache = Array.from(document.querySelectorAll('#groups .group-card'));
+    return _groupsCache;
+  }
 
   function rowBytes(row) {
     if (!row) return 0;
@@ -384,7 +397,7 @@
     const t = e.target;
     if (!(t instanceof HTMLInputElement) || !t.classList.contains('row-check')) return;
     const row = t.closest('.torrent-row');
-    const h = row?.getAttribute('data-hash');
+    const h = row && row.getAttribute('data-hash');
     if (!h) return;
     if (t.checked) selection.set(h, rowBytes(row));
     else selection.delete(h);
@@ -393,29 +406,162 @@
   });
 
   /* =========================================================================
-     Bulk delete: buffered undo toast instead of a blocking confirm().
-     Industry pattern (Gmail / Linear / Superhuman). The qBit request fires
-     after a grace window unless the user clicks Undo or presses `u`. If a
-     second delete kicks off during the window, the first one commits
-     immediately (FIFO) so we never overlap pending actions.
+     Confirm-delete dialog. Opens from the selection bar's Delete / Delete +
+     purge buttons; shows a grouped summary of what is about to be removed
+     before firing POST /torrents/bulk/cleanup.
      ========================================================================= */
-  const UNDO_WINDOW_MS = 8000;
-  let pending = null; // { hashes, purge, sizeBytes, commitAt, timer, controller }
+  let confirmPurge = false;
+  let confirmTrigger = null;
 
-  async function commitPending(send = true) {
-    if (!pending) return;
-    /* Undo path: un-dim the soft-hidden rows before we drop the pending
-     * reference so they snap back to normal instead of vanishing after
-     * the SSE poll catches up. */
-    if (!send) restorePendingRows();
-    const p = pending;
-    pending = null;
-    if (p.timer) { clearTimeout(p.timer); p.timer = null; }
-    hideUndoToast();
-    if (!send) return;
+  function confirmOpen() {
+    const modal = document.getElementById('confirm-delete');
+    return !!(modal && modal.dataset.active === 'true');
+  }
+
+  function groupTitleOf(card) {
+    if (!card) return 'Other';
+    const titleEl = card.querySelector('.group-meta .title');
+    return titleEl ? titleEl.textContent.trim() : (card.id || 'Group');
+  }
+
+  function buildConfirmRowItem(row) {
+    const li = document.createElement('li');
+
+    /* Quality badge: clone existing styled node so the modal item matches
+       the row's tier color without duplicating CSS. */
+    const badge = row.querySelector('.q-badge');
+    if (badge) li.appendChild(badge.cloneNode(true));
+
+    /* Name: text only -- the row's .name may contain a keeper badge span
+       we don't need in the summary. */
+    const name = document.createElement('span');
+    name.className = 'confirm-name';
+    const nameEl = row.querySelector('.name');
+    name.textContent = nameEl ? nameEl.textContent.trim() : (row.getAttribute('data-hash') || '');
+    name.title = name.textContent;
+    li.appendChild(name);
+
+    /* Size from cached bytes (no DOM walk). */
+    const size = document.createElement('span');
+    size.className = 'confirm-size-cell';
+    const bytes = rowBytes(row);
+    size.textContent = bytes ? (bytes / 1073741824).toFixed(2) + ' GB' : '';
+    li.appendChild(size);
+
+    /* Reason factors: clone existing pill structure. Falls back to the
+       row's title attribute as a single chip when no factor pills exist. */
+    const factors = row.querySelector('.reason-factors');
+    if (factors) {
+      li.appendChild(factors.cloneNode(true));
+    } else {
+      const reason = row.getAttribute('title');
+      if (reason) {
+        const r = document.createElement('span');
+        r.className = 'reason-chip';
+        r.textContent = reason;
+        li.appendChild(r);
+      } else {
+        /* Keep grid columns aligned even when no reason -- empty span. */
+        li.appendChild(document.createElement('span'));
+      }
+    }
+    return li;
+  }
+
+  function openConfirmDialog(purge, triggerBtn) {
+    if (selection.size === 0) return;
+    const modal = document.getElementById('confirm-delete');
+    if (!modal) return;
+
+    confirmPurge = !!purge;
+    confirmTrigger = triggerBtn instanceof HTMLElement ? triggerBtn : null;
+
+    /* Group selected hashes by their owning .group-card via O(1) lookups. */
+    const groups = new Map();
+    let totalBytes = 0;
+    let rowsCount = 0;
+    for (const h of selection.keys()) {
+      const row = document.getElementById('torrent-' + h);
+      if (!row) continue;
+      const card = row.closest('.group-card');
+      if (!groups.has(card)) groups.set(card, []);
+      groups.get(card).push(row);
+      totalBytes += rowBytes(row);
+      rowsCount++;
+    }
+
+    const countEl = document.getElementById('confirm-count');
+    if (countEl) countEl.textContent = String(rowsCount);
+    const sizeEl = document.getElementById('confirm-size');
+    if (sizeEl) sizeEl.textContent = (totalBytes / 1073741824).toFixed(2);
+    const purgeTag = document.getElementById('confirm-purge-tag');
+    if (purgeTag) purgeTag.hidden = !confirmPurge;
+    const goBtn = document.getElementById('confirm-go');
+    if (goBtn) goBtn.textContent = confirmPurge ? 'Delete + purge files' : 'Delete';
+
+    const body = document.getElementById('confirm-body');
+    if (body) {
+      body.replaceChildren();
+      for (const [card, rows] of groups) {
+        const section = document.createElement('section');
+        const h3 = document.createElement('h3');
+        const titleText = document.createTextNode(groupTitleOf(card));
+        h3.appendChild(titleText);
+        if (rows.length > 1) {
+          const cnt = document.createElement('span');
+          cnt.className = 'group-count';
+          cnt.textContent = '(' + rows.length + ')';
+          h3.appendChild(cnt);
+        }
+        section.appendChild(h3);
+        const ul = document.createElement('ul');
+        for (const r of rows) ul.appendChild(buildConfirmRowItem(r));
+        section.appendChild(ul);
+        body.appendChild(section);
+      }
+    }
+
+    modal.dataset.active = 'true';
+    modal.setAttribute('aria-hidden', 'false');
+    /* Focus the action button on the next tick so Tab/Shift+Tab focus-trap
+       starts from a known anchor and Enter fires the button immediately. */
+    requestAnimationFrame(() => {
+      const f = document.getElementById('confirm-go');
+      if (f instanceof HTMLElement) f.focus();
+    });
+  }
+
+  function closeConfirmDialog() {
+    const modal = document.getElementById('confirm-delete');
+    if (!modal) return;
+    modal.dataset.active = 'false';
+    modal.setAttribute('aria-hidden', 'true');
+    if (confirmTrigger && confirmTrigger.isConnected) {
+      confirmTrigger.focus();
+    }
+    confirmTrigger = null;
+  }
+
+  async function commitDelete() {
+    const hashes = Array.from(selection.keys());
+    if (hashes.length === 0) { closeConfirmDialog(); return; }
+    const purge = confirmPurge;
+    closeConfirmDialog();
+    /* Clear selection immediately so the footer collapses -- SSE will
+       retire the rows shortly. Direct getElementById lookups skip the
+       O(N) `.row-check:checked` walk. */
+    for (const h of hashes) {
+      const row = document.getElementById('torrent-' + h);
+      if (!row) continue;
+      const cb = row.querySelector('.row-check');
+      if (cb instanceof HTMLInputElement) cb.checked = false;
+      row.setAttribute('data-marked', 'false');
+    }
+    selection.clear();
+    repaintSelectionFooter();
     const body = new URLSearchParams();
-    body.set('hashes', p.hashes.join('|'));
-    body.set('purge', p.purge ? '1' : '0');
+    body.set('hashes', hashes.join('|'));
+    body.set('purge', purge ? '1' : '0');
     try {
       const res = await fetch('/torrents/bulk/cleanup', { method: 'POST', body });
       if (!res.ok) alert('Cleanup failed: HTTP ' + res.status);
@@ -424,244 +570,34 @@
     }
   }
 
-  function hideUndoToast() {
-    const t = document.getElementById('undo-toast');
-    if (!t) return;
-    t.dataset.active = 'false';
-    t.removeAttribute('data-paused');
-  }
-
-  function showUndoToast(count, sizeBytes, purge) {
-    const t = document.getElementById('undo-toast');
-    if (!t) return;
-    const countEl = document.getElementById('undo-count');
-    const sizeEl = document.getElementById('undo-size');
-    const purgeTag = document.getElementById('undo-purge-tag');
-    if (countEl) countEl.textContent = String(count);
-    if (sizeEl) sizeEl.textContent = (sizeBytes / 1073741824).toFixed(2);
-    if (purgeTag) purgeTag.hidden = !purge;
-    /* Force the progress-bar animation to restart cleanly. Toggling data-active
-       off then on schedules the rule that runs the keyframes without picking
-       up the previous run's elapsed time. */
-    t.dataset.active = 'false';
-    t.removeAttribute('data-paused');
-    /* eslint-disable-next-line no-unused-expressions */
-    t.offsetWidth; // reflow
-    t.dataset.active = 'true';
-  }
-
-  function applyDelete(purge) {
-    const hashes = Array.from(selection.keys());
-    if (hashes.length === 0) return;
-    let sizeBytes = 0;
-    for (const b of selection.values()) sizeBytes += b;
-    /* If a previous delete is still pending, fire it now (FIFO) so we never
-       have two outstanding bulk actions. The selection footer was already
-       hidden after the previous click. */
-    if (pending) commitPending(true);
-    /* Soft-hide the marked rows so the toast doesn't compete with them
-       visually. Keeping them in the DOM means Undo can restore instantly
-       without a 1-3 s SSE round-trip. The reconciler's TORRENT_REMOVED
-       event will fully delete them once the commit fires. */
-    const dimmed = new Set(hashes);
-    document.querySelectorAll('.torrent-row').forEach((row) => {
-      const h = row.getAttribute('data-hash');
-      if (h && dimmed.has(h)) row.classList.add('qf-pending-delete');
-    });
-    pending = {
-      hashes,
-      purge,
-      sizeBytes,
-      commitAt: Date.now() + UNDO_WINDOW_MS,
-      timer: null,
-    };
-    pending.timer = setTimeout(() => commitPending(true), UNDO_WINDOW_MS);
-    selection.clear();
-    repaintSelectionFooter();
-    showUndoToast(hashes.length, sizeBytes, purge);
-  }
-
-  function restorePendingRows() {
-    if (!pending) return;
-    const restore = new Set(pending.hashes);
-    document.querySelectorAll('.torrent-row.qf-pending-delete').forEach((row) => {
-      const h = row.getAttribute('data-hash');
-      if (h && restore.has(h)) row.classList.remove('qf-pending-delete');
-    });
-  }
-
-  /* Click handler: dedicated to the Undo button so we don't fight the
-     bulk-action delegated click listener below. */
-  document.addEventListener('click', (e) => {
-    const t = e.target;
-    if (!(t instanceof Element)) return;
-    if (t.closest('#undo-action')) {
-      e.stopPropagation();
-      commitPending(false); // abort: do not send
-    }
-  });
-
-  /* Hovering the toast pauses the countdown so the user has time to read it
-     without the action firing under their nose. Leaving resumes. The CSS
-     animation handles the visual pause; the JS timer still fires on time,
-     so the maximum extra grace is whatever the user does in <a few hundred
-     ms after un-hovering. Good enough -- the JS timer + CSS bar can drift
-     a frame; we don't try to make them tick-perfect. */
-  document.addEventListener('mouseenter', (e) => {
-    const t = e.target;
-    if (t instanceof Element && t.id === 'undo-toast') {
-      t.setAttribute('data-paused', 'true');
-    }
-  }, true);
-  document.addEventListener('mouseleave', (e) => {
-    const t = e.target;
-    if (t instanceof Element && t.id === 'undo-toast') {
-      t.removeAttribute('data-paused');
-    }
-  }, true);
-
-  /* If the tab is about to be closed mid-window, fire the request via
-     sendBeacon so the user doesn't end up with "I clicked delete but it
-     never happened" surprise. sendBeacon is the only reliable cross-browser
-     way to ship a POST during pagehide. */
-  window.addEventListener('pagehide', () => {
-    if (!pending) return;
-    try {
-      const body = new URLSearchParams();
-      body.set('hashes', pending.hashes.join('|'));
-      body.set('purge', pending.purge ? '1' : '0');
-      navigator.sendBeacon('/torrents/bulk/cleanup', body);
-    } catch (e) { /* old browser -- best effort */ }
-    pending = null;
-  });
-
+  /* clearSelection: O(k) direct lookups instead of a doc-wide
+     `.row-check:checked` walk. */
   function clearSelection() {
+    for (const h of selection.keys()) {
+      const row = document.getElementById('torrent-' + h);
+      if (!row) continue;
+      const cb = row.querySelector('.row-check');
+      if (cb instanceof HTMLInputElement) cb.checked = false;
+      row.setAttribute('data-marked', 'false');
+    }
     selection.clear();
-    document.querySelectorAll('.row-check:checked').forEach((cb) => {
-      if (cb instanceof HTMLInputElement) {
-        cb.checked = false;
-        const row = cb.closest('.torrent-row');
-        if (row) row.setAttribute('data-marked', 'false');
-      }
-    });
     repaintSelectionFooter();
   }
-
-  /* keys.js is loaded inline above #selection-bar so the elements aren't in
-     the DOM yet at IIFE-execution time. Use delegation on document so the
-     handlers fire regardless of parse order (and would survive a re-render
-     of the bar). */
-  document.addEventListener('click', (e) => {
-    const t = e.target;
-    if (!(t instanceof Element)) return;
-    const btn = t.closest('#sel-delete, #sel-purge, #sel-clear');
-    if (!btn) return;
-    if (btn.id === 'sel-delete') applyDelete(false);
-    else if (btn.id === 'sel-purge') applyDelete(true);
-    else clearSelection();
-  });
-
-  /* After a fresh swap into #groups (filter POST, rule preview, SSE RESYNC),
-     auto-add every row the server marked as a rule match to the selection
-     map and reflect that in checkbox state. The user can deselect mistakes
-     before confirming bulk-delete.
-
-     Gated on the swap *target* being #groups or rule-bar-slot specifically:
-     per-row OOB swaps from the SSE storm hit this listener dozens of times
-     per tick. Without the guard, every tick walked all 1310 rows looking
-     for data-marked="true". With the guard, the scan only runs on the
-     handful of swaps that actually replace the group payload, and we scope
-     querySelectorAll to the swapped subtree instead of the whole document. */
-  document.body.addEventListener('htmx:afterSwap', (e) => {
-    const target = e.detail && e.detail.target;
-    if (!target) return;
-    if (target.id !== 'groups' && target.id !== 'rule-bar-slot') return;
-    const scope = target.id === 'groups' ? target : document;
-    scope.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {
-      const h = row.getAttribute('data-hash');
-      if (h) selection.set(h, rowBytes(row));
-      const cb = row.querySelector('.row-check');
-      if (cb instanceof HTMLInputElement) cb.checked = true;
-    });
-    repaintSelectionFooter();
-  });
-
-  /* The `selection` Map is the client-side source of truth. The server
-     renders torrent rows without any selection context (render_torrent has
-     no way to know what each client has selected), so every SSE row update
-     comes back with data-marked="false" and an unchecked checkbox. Without
-     this listener, any field change (progress/ratio/state) on a selected
-     torrent would visibly unselect it ~1s later when the reconciler ticks.
-
-     Restore selection state from the Map back onto the DOM for any
-     .torrent-row that just got OOB-swapped (single row or a whole #groups
-     re-render on RESYNC). Hashes not in `selection` are skipped, so user
-     deselections persist. */
-  function reapplySelectionTo(scope) {
-    if (!scope || !(scope instanceof Element)) return;
-    const rows = scope.classList.contains('torrent-row')
-      ? [scope]
-      : scope.querySelectorAll('.torrent-row');
-    let dirty = false;
-    rows.forEach((row) => {
-      const h = row.getAttribute('data-hash');
-      if (!h || !selection.has(h)) return;
-      const cb = row.querySelector('.row-check');
-      if (cb instanceof HTMLInputElement && !cb.checked) cb.checked = true;
-      if (row.getAttribute('data-marked') !== 'true') {
-        row.setAttribute('data-marked', 'true');
-      }
-      // Refresh stored size: a row's bytes can change as it downloads, and
-      // the footer total should track the latest server-reported value.
-      selection.set(h, rowBytes(row));
-      dirty = true;
-    });
-    if (dirty) repaintSelectionFooter();
-  }
-
-  document.body.addEventListener('htmx:oobAfterSwap', (e) => {
-    reapplySelectionTo(e.target);
-  });
-
-  document.addEventListener('DOMContentLoaded', repaintSelectionFooter);
 
   /* =========================================================================
-     Keyboard shortcuts + focused-row cursor + selection helpers.
-
-     The user is triaging 600+ groups -- mouse-only doesn't scale. Bindings
-     follow cross-tool conventions (Linear / Gmail / GitHub):
-       j/k        next/prev row
-       J/K        next/prev group
-       x/Space    toggle focused row
-       Shift+X    range select from last anchor
-       Ctrl+A     select all visible
-       a          select rule-flagged rows in focused group
-       i          invert selection
-       Enter      delete (keep files)
-       u          undo pending delete
-       1..9       activate Nth rule chip
-       ?          toggle cheatsheet
-       /          focus search   (already wired)
-       Esc        cancel / close (already wired)
+     Selection helpers (keyboard + multi-select).
      ========================================================================= */
-
-  let focusedHash = null;       // hash of the row currently keyboard-focused
-  let rangeAnchorHash = null;   // anchor for Shift+X range select
-
-  function visibleRows() {
-    return Array.from(document.querySelectorAll('#groups .torrent-row'));
-  }
-  function visibleGroups() {
-    return Array.from(document.querySelectorAll('#groups .group-card'));
-  }
-
   function setFocusedRow(row) {
-    if (!row) return;
-    document.querySelectorAll('.torrent-row[data-focused="true"]').forEach((r) => {
-      if (r !== row) r.removeAttribute('data-focused');
-    });
-    row.setAttribute('data-focused', 'true');
+    if (!row || row === focusedRowEl) {
+      if (row) row.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      return;
+    }
+    if (focusedRowEl && focusedRowEl.isConnected) {
+      focusedRowEl.removeAttribute('data-focused');
+    }
+    focusedRowEl = row;
     focusedHash = row.getAttribute('data-hash');
+    row.setAttribute('data-focused', 'true');
     row.scrollIntoView({ block: 'nearest', behavior: 'auto' });
   }
 
@@ -688,8 +624,6 @@
     if (groups.length === 0) return;
     const rows = visibleRows();
     const idx = focusedRowIndex(rows);
-    /* Find the group containing the currently focused row; if none, jump
-       to first/last group. */
     let currentGroup = -1;
     if (idx >= 0) {
       const card = rows[idx].closest('.group-card');
@@ -711,25 +645,34 @@
     rangeAnchorHash = row.getAttribute('data-hash');
   }
 
-  function rangeSelect(toRow) {
+  /* Range selection -- shift-click / Shift+X. With `forceChecked = true`
+     all in-range rows are set TRUE (Finder / Gmail semantics: shift-click
+     extends the selection rather than toggling). */
+  function rangeSelectTo(toRow, forceChecked) {
     if (!toRow) return;
     const rows = visibleRows();
     if (!rangeAnchorHash) {
-      /* No anchor yet -- treat current row as the anchor and select it. */
+      rangeAnchorHash = toRow.getAttribute('data-hash');
       toggleRowSelection(toRow);
       return;
     }
-    const from = rows.findIndex((r) => r.getAttribute('data-hash') === rangeAnchorHash);
-    const to = rows.findIndex((r) => r === toRow);
+    let from = -1, to = -1;
+    for (let i = 0; i < rows.length; i++) {
+      const h = rows[i].getAttribute('data-hash');
+      if (h === rangeAnchorHash) from = i;
+      if (rows[i] === toRow) to = i;
+      if (from >= 0 && to >= 0) break;
+    }
     if (from < 0 || to < 0) { toggleRowSelection(toRow); return; }
     const [lo, hi] = from < to ? [from, to] : [to, from];
     for (let i = lo; i <= hi; i++) {
       const cb = rows[i].querySelector('.row-check');
-      if (cb instanceof HTMLInputElement && !cb.checked) {
-        cb.checked = true;
+      if (cb instanceof HTMLInputElement && cb.checked !== forceChecked) {
+        cb.checked = forceChecked;
         cb.dispatchEvent(new Event('change', { bubbles: true }));
       }
     }
+    rangeAnchorHash = toRow.getAttribute('data-hash');
   }
 
   function selectAllVisible() {
@@ -752,8 +695,7 @@
     const rows = visibleRows();
     rows.forEach((row) => {
       /* Skip rule-recommended keepers so an inverted selection doesn't
-         accidentally pick the keeper. The keeper is, by design, the row
-         the user wants to keep. */
+         accidentally pick the keeper. */
       if (row.getAttribute('data-keeper') === 'true') return;
       const cb = row.querySelector('.row-check');
       if (!(cb instanceof HTMLInputElement)) return;
@@ -801,14 +743,57 @@
     cs.setAttribute('aria-hidden', open ? 'false' : 'true');
   }
 
+  /* =========================================================================
+     Unified click dispatch -- replaces three former document-level click
+     handlers (undo button, bulk-action buttons, cheatsheet + row focus +
+     per-group buttons). Branches in cheapest-check-first order.
+     ========================================================================= */
   document.addEventListener('click', (e) => {
     const t = e.target;
     if (!(t instanceof Element)) return;
-    if (t.closest('#kbd-close')) { toggleCheatsheet(false); return; }
-    /* Backdrop click closes (target IS the overlay, not the inner card). */
-    if (t.id === 'kbd-cheatsheet') { toggleCheatsheet(false); return; }
-    if (t.closest('#sel-invert')) { e.stopPropagation(); invertSelection(); return; }
-    if (t.closest('#sel-losers')) { e.stopPropagation(); selectAllLosers(); return; }
+
+    /* 1. Row checkbox: native toggle, but record anchor and intercept
+       Shift+click to do a range-extend instead of a single toggle.
+       `preventDefault` on the click event cancels the browser's own
+       toggle of the checkbox state. */
+    if (t instanceof HTMLInputElement && t.classList.contains('row-check')) {
+      const row = t.closest('.torrent-row');
+      if (!row) return;
+      if (e.shiftKey) {
+        e.preventDefault();
+        rangeSelectTo(row, true);
+        return;
+      }
+      rangeAnchorHash = row.getAttribute('data-hash');
+      return;
+    }
+
+    /* 2. Confirm-delete modal: backdrop click, action buttons. */
+    if (t.id === 'confirm-delete') { closeConfirmDialog(); return; }
+    if (t.closest('#confirm-cancel')) { e.stopPropagation(); closeConfirmDialog(); return; }
+    if (t.closest('#confirm-go')) { e.stopPropagation(); commitDelete(); return; }
+
+    /* 3. Cheatsheet overlay: backdrop or close button. */
+    if (t.closest('#kbd-close') || t.id === 'kbd-cheatsheet') {
+      toggleCheatsheet(false);
+      return;
+    }
+
+    /* 4. Selection-bar action buttons. */
+    const sbBtn = t.closest('#sel-delete, #sel-purge, #sel-clear, #sel-invert, #sel-losers');
+    if (sbBtn) {
+      e.stopPropagation();
+      switch (sbBtn.id) {
+        case 'sel-delete': openConfirmDialog(false, sbBtn); break;
+        case 'sel-purge':  openConfirmDialog(true, sbBtn);  break;
+        case 'sel-clear':  clearSelection();                break;
+        case 'sel-invert': invertSelection();               break;
+        case 'sel-losers': selectAllLosers();               break;
+      }
+      return;
+    }
+
+    /* 5. Per-group "select losers" button. */
     const groupBtn = t.closest('.group-select-losers');
     if (groupBtn) {
       e.stopPropagation();
@@ -816,29 +801,76 @@
       if (card) selectLosersInGroup(card);
       return;
     }
-    /* Row focus follows mouse click on a row body (but not on checkbox /
-       buttons inside the row). */
+
+    /* 6. Row body: shift-click range, ctrl/cmd-click toggle, plain click
+       just focuses. Skip clicks on interactive descendants (buttons,
+       links, checkbox -- handled above, anchors). */
+    if (t.closest('button, a, input')) return;
     const row = t.closest('.torrent-row');
-    if (row && !(t.closest('.row-check, button, a, input'))) {
+    if (!row) return;
+    if (e.shiftKey) {
+      e.preventDefault();
+      rangeSelectTo(row, true);
       setFocusedRow(row);
+      return;
     }
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      toggleRowSelection(row);
+      setFocusedRow(row);
+      return;
+    }
+    setFocusedRow(row);
   });
 
+  /* =========================================================================
+     Keyboard shortcuts + focused-row cursor + selection helpers.
+
+     j/k        next/prev row
+     J/K        next/prev group
+     x/Space    toggle focused row
+     Shift+X    range select from last anchor
+     Ctrl+A     select all visible
+     a          select rule-flagged rows in focused group
+     i          invert selection
+     Enter      open confirm-delete (or commit when modal is open & focused)
+     1..9       activate Nth rule chip
+     ?          toggle cheatsheet
+     /          focus search
+     Esc        close modal / cheatsheet / drawer / clear selection
+     ========================================================================= */
   document.addEventListener('keydown', (e) => {
     const tag = (e.target && e.target.tagName) || '';
     const typing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
+
+    /* Focus trap for the confirm-delete modal: cycle Tab / Shift+Tab between
+       Cancel and Delete. Two-element trap -- no generic focusable scan. */
+    if (e.key === 'Tab' && confirmOpen()) {
+      const cancel = document.getElementById('confirm-cancel');
+      const go = document.getElementById('confirm-go');
+      if (cancel && go) {
+        const active = document.activeElement;
+        if (e.shiftKey) {
+          if (active === cancel) { e.preventDefault(); go.focus(); }
+        } else {
+          if (active === go) { e.preventDefault(); cancel.focus(); }
+        }
+      }
+      return;
+    }
 
     if (e.key === '/' && !typing) {
       const search = document.getElementById('search-input');
       if (search) { e.preventDefault(); search.focus(); search.select(); }
       return;
     }
+
     if (e.key === 'Escape') {
+      if (confirmOpen()) { e.preventDefault(); closeConfirmDialog(); return; }
       const cs = document.getElementById('kbd-cheatsheet');
       if (cs && cs.dataset.active === 'true') { toggleCheatsheet(false); return; }
       const drawer = document.getElementById('filter-drawer');
       if (drawer && drawer.classList.contains('open')) { drawer.classList.remove('open'); return; }
-      if (pending) { commitPending(false); return; }
       if (selection.size > 0) { clearSelection(); return; }
       const search = document.getElementById('search-input');
       if (search && document.activeElement === search) { search.blur(); }
@@ -846,9 +878,7 @@
     }
     if (typing) return; // all remaining bindings are single-letter; don't fight inputs
 
-    /* Ctrl/Cmd+A: select all visible. Preventing the default Select-All is
-       only safe when there's something to select; otherwise let the browser
-       do its thing. */
+    /* Ctrl/Cmd+A: select all visible. */
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
       const rows = visibleRows();
       if (rows.length === 0) return;
@@ -876,7 +906,7 @@
       case 'X': {
         const rows = visibleRows();
         const idx = focusedRowIndex(rows);
-        if (idx >= 0) { e.preventDefault(); rangeSelect(rows[idx]); }
+        if (idx >= 0) { e.preventDefault(); rangeSelectTo(rows[idx], true); }
         break;
       }
       case 'a': {
@@ -890,11 +920,11 @@
       }
       case 'i':
         e.preventDefault(); invertSelection(); break;
-      case 'u':
-        if (pending) { e.preventDefault(); commitPending(false); }
-        break;
       case 'Enter':
-        if (selection.size > 0) { e.preventDefault(); applyDelete(false); }
+        if (selection.size > 0 && !confirmOpen()) {
+          e.preventDefault();
+          openConfirmDialog(false, document.getElementById('sel-delete'));
+        }
         break;
       case '?':
         e.preventDefault(); toggleCheatsheet(); break;
@@ -906,16 +936,92 @@
     }
   });
 
-  /* When the group list re-renders, the previously-focused row may be gone.
-     Try to restore focus by hash; if the hash is missing, drop focus. */
+  /* =========================================================================
+     Post-swap restoration: selection re-apply + focused-row restore +
+     auto-select rule-flagged rows + visible-cache invalidation.
+     One handler each for afterSwap and oobAfterSwap (down from two each).
+     ========================================================================= */
+  function reapplySelectionTo(scope) {
+    if (!scope || !(scope instanceof Element)) return;
+    const rows = scope.classList && scope.classList.contains('torrent-row')
+      ? [scope]
+      : scope.querySelectorAll('.torrent-row');
+    let dirty = false;
+    rows.forEach((row) => {
+      const h = row.getAttribute('data-hash');
+      if (!h || !selection.has(h)) return;
+      const cb = row.querySelector('.row-check');
+      if (cb instanceof HTMLInputElement && !cb.checked) cb.checked = true;
+      if (row.getAttribute('data-marked') !== 'true') {
+        row.setAttribute('data-marked', 'true');
+      }
+      selection.set(h, rowBytes(row));
+      dirty = true;
+    });
+    if (dirty) repaintSelectionFooter();
+  }
+
+  function touchedGroups(target) {
+    if (!target || !(target instanceof Element)) return false;
+    if (target.id === 'groups') return true;
+    return !!(target.closest && target.closest('#groups'));
+  }
+
   document.body.addEventListener('htmx:afterSwap', (e) => {
     const target = e.detail && e.detail.target;
-    if (!target || target.id !== 'groups') return;
-    if (!focusedHash) return;
-    const row = document.querySelector('.torrent-row[data-hash="' + CSS.escape(focusedHash) + '"]');
-    if (row) row.setAttribute('data-focused', 'true');
-    else focusedHash = null;
+    if (!target) return;
+
+    if (target.id === 'groups' || target.id === 'rule-bar-slot') {
+      /* On a full #groups / rule-bar replacement, auto-add rule-flagged
+         rows to selection (rule-cleanup UX) and restore focused-row
+         outline by hash. */
+      const scope = target.id === 'groups' ? target : document;
+      scope.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {
+        const h = row.getAttribute('data-hash');
+        if (h) selection.set(h, rowBytes(row));
+        const cb = row.querySelector('.row-check');
+        if (cb instanceof HTMLInputElement) cb.checked = true;
+      });
+      repaintSelectionFooter();
+
+      if (target.id === 'groups' && focusedHash) {
+        const row = document.querySelector(
+          '.torrent-row[data-hash="' + CSS.escape(focusedHash) + '"]',
+        );
+        if (row) {
+          focusedRowEl = row;
+          row.setAttribute('data-focused', 'true');
+        } else {
+          focusedRowEl = null;
+          focusedHash = null;
+        }
+      }
+    }
+
+    if (touchedGroups(target)) invalidateVisibleCache();
   });
+
+  document.body.addEventListener('htmx:oobAfterSwap', (e) => {
+    const target = e.detail && e.detail.target;
+    if (!target) return;
+
+    /* Batch-staging OOB swap: relay children into #groups. Synthetic
+       afterSwap/oobAfterSwap events dispatched inside applyBatchStaging
+       re-enter this listener with target.id === 'groups', so the rest of
+       the flow (selection re-apply, viewport observer) still fires. */
+    if (target.id === 'qf-batch-staging') {
+      requestAnimationFrame(() => applyBatchStaging(target));
+      return;
+    }
+
+    /* Single-row or partial OOB swap: re-apply selection state from the
+       in-memory Map so SSE row updates don't visibly unselect rows. */
+    reapplySelectionTo(e.target);
+
+    if (touchedGroups(target)) invalidateVisibleCache();
+  });
+
+  document.addEventListener('DOMContentLoaded', repaintSelectionFooter);
 
   /* =========================================================================
      SSE connection-state indicator.

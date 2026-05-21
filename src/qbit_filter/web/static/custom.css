@@ -929,86 +929,165 @@ kbd {
   white-space: nowrap;
 }
 
-/* Soft-hide rows that are pending bulk-delete. Lets the user see what's
-   about to disappear while the undo toast counts down, without these rows
-   competing for attention. Undo strips this class; commit triggers the
-   reconciler's TORRENT_REMOVED which deletes the row entirely. */
-.torrent-row.qf-pending-delete {
-  opacity: 0.35;
-  filter: grayscale(0.4);
-  transition: opacity var(--motion-base) var(--ease-out),
-              filter var(--motion-base) var(--ease-out);
-  pointer-events: none;
-}
-
-/* Undo toast -- soft safety net for bulk delete. Slides in bottom-right
-   after the user clicks Delete/Purge; the actual qBit request is buffered
-   for --motion-undo-window ms, abortable via the Undo button or `u` key. */
-.undo-toast {
+/* Bulk-delete confirmation modal. Opens when the user clicks Delete or
+   Delete + purge in the selection bar; shows a grouped summary of what's
+   being removed (with rule reasons/factors) before firing the request.
+   Mirrors the cheatsheet overlay token usage. */
+.confirm-modal {
   position: fixed;
-  bottom: 72px; /* clear of the selection bar (~56px + breathing room) */
-  right: 16px;
-  display: flex;
+  inset: 0;
+  display: none;
   align-items: center;
-  gap: 12px;
-  min-width: 260px;
-  padding: 10px 14px;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 70;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-in);
+}
+.confirm-modal[data-active='true'] {
+  display: flex;
+  opacity: 1;
+  transition: opacity var(--motion-base) var(--ease-out);
+}
+.confirm-card {
+  width: min(720px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
   background: var(--surface-hi);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  color: var(--fg);
-  opacity: 0;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
   transform: translateY(8px);
-  pointer-events: none;
-  transition: opacity var(--motion-fast) var(--ease-in),
-              transform var(--motion-fast) var(--ease-in);
-  z-index: 30;
+  transition: transform var(--motion-base) var(--ease-out);
   overflow: hidden;
 }
-.undo-toast[data-active='true'] {
-  opacity: 1;
-  transform: translateY(0);
-  pointer-events: auto;
-  transition: opacity var(--motion-base) var(--ease-out),
-              transform var(--motion-base) var(--ease-out);
+.confirm-modal[data-active='true'] .confirm-card { transform: translateY(0); }
+
+.confirm-head {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
 }
-.undo-toast .undo-msg { flex: 1; }
-.undo-toast .undo-msg strong { color: var(--danger); font-weight: 600; }
-.undo-toast #undo-action {
-  height: 28px;
-  padding: 0 12px;
-  background: transparent;
-  border: 1px solid var(--accent);
+.confirm-title-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.confirm-head h2 {
+  margin: 0;
+  font-size: var(--t-lg);
+  font-weight: 600;
+  color: var(--fg);
+}
+.confirm-head h2 span {
+  font-family: var(--font-mono);
   color: var(--accent);
-  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+.confirm-sub {
   font-family: var(--font-mono);
   font-size: var(--t-sm);
-  cursor: pointer;
-  transition: background-color var(--motion-fast) var(--ease-standard);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.undo-toast #undo-action:hover { background: var(--accent-soft); }
-.undo-toast .undo-progress {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  background: var(--accent);
-  transform-origin: left center;
-  transform: scaleX(1);
-  pointer-events: none;
+.purge-tag {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--danger);
+  padding: 2px 6px;
+  border: 1px solid rgba(229, 72, 77, 0.32);
+  background: var(--danger-soft);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
 }
-@keyframes qf-undo-countdown {
-  from { transform: scaleX(1); }
-  to   { transform: scaleX(0); }
+
+.confirm-body {
+  padding: 8px 20px 12px;
+  overflow-y: auto;
+  flex: 1 1 auto;
 }
-.undo-toast[data-active='true'] .undo-progress {
-  animation: qf-undo-countdown var(--motion-undo-window) linear forwards;
+.confirm-body section { padding: 8px 0; }
+.confirm-body section + section { border-top: 1px solid var(--border); }
+.confirm-body h3 {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  margin: 0 0 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
 }
-.undo-toast[data-paused='true'] .undo-progress { animation-play-state: paused; }
+.confirm-body h3 .group-count {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.confirm-body ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.confirm-body li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  padding: 4px 0;
+  align-items: center;
+  font-size: var(--t-sm);
+}
+.confirm-name {
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.confirm-size-cell {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+.confirm-body .reason-factors {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+.confirm-body .reason-chip {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+}
+
+.confirm-actions {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--surface-hi);
+}
+.confirm-hint {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.confirm-buttons { display: flex; gap: 8px; }
+@media (max-width: 540px) {
+  .confirm-hint { display: none; }
+  .confirm-actions { justify-content: flex-end; }
+}
 
 /* ----- Motion vocabulary (shared by all bundles) ----- */
 

@@ -1,0 +1,33 @@
+{# Confirmation dialog for bulk delete / delete-purge. Hidden by default;
+   keys.js opens it from the Delete / Delete + purge buttons and populates
+   #confirm-body with a grouped summary (per .group-card) of the rows the
+   user selected. Acts as the final guard before the POST to qBit. #}
+<div id="confirm-delete"
+     class="confirm-modal"
+     data-active="false"
+     role="dialog"
+     aria-modal="true"
+     aria-hidden="true"
+     aria-labelledby="confirm-title">
+  <div class="confirm-card" role="document">
+    <header class="confirm-head">
+      <div class="confirm-title-wrap">
+        <h2 id="confirm-title">
+          Delete <span id="confirm-count">0</span> torrents
+        </h2>
+        <span id="confirm-purge-tag" class="purge-tag" hidden>+ purge files</span>
+      </div>
+      <span class="confirm-sub">
+        <span id="confirm-size">0</span> GB
+      </span>
+    </header>
+    <div id="confirm-body" class="confirm-body"></div>
+    <footer class="confirm-actions">
+      <span class="confirm-hint" aria-hidden="true">Esc to cancel &middot; Enter to confirm</span>
+      <div class="confirm-buttons">
+        <button id="confirm-cancel" class="btn" type="button">Cancel</button>
+        <button id="confirm-go" class="btn btn-danger" type="button">Delete</button>
+      </div>
+    </footer>
+  </div>
+</div>
