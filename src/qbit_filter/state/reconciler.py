@@ -358,6 +358,13 @@ class Reconciler:
                     f"Cold boot complete -- {group_count} groups ready"
                 )
             kind = EventKind.RESYNC if is_final else EventKind.RESYNC_PARTIAL
+            logger.debug(
+                "cold-boot chunk: %d/%d torrents, %d groups, kind=%s",
+                end,
+                total,
+                group_count,
+                kind.name,
+            )
             self.bus.publish(DomainEvent(kind=kind))
             idx = end
 

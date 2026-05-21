@@ -1,4 +1,41 @@
 (function () {
+  /* =========================================================================
+     qfLog -- thin debug logger gated on ``?qf_debug=1`` or
+     ``localStorage.qf_debug='1'``. Off by default so production console
+     stays quiet; on once flagged, prints every selection change, MO
+     pruning decision, batch staging boundary, and auto-select run. Use
+     when chasing SSE/selection/streaming races -- this is the kind of
+     scope where stepping through with a debugger lies because the bugs
+     are micro-task ordered.
+
+     Errors and warnings always go through console directly so flags
+     don't suppress real problems. */
+  const qfDebug = (() => {
+    try {
+      const q = new URLSearchParams(window.location.search);
+      if (q.get('qf_debug') === '1') {
+        localStorage.setItem('qf_debug', '1');
+        return true;
+      }
+      if (q.get('qf_debug') === '0') {
+        localStorage.removeItem('qf_debug');
+        return false;
+      }
+      return localStorage.getItem('qf_debug') === '1';
+    } catch (e) { return false; }
+  })();
+  const qfLog = {
+    debug: qfDebug
+      ? (...a) => console.debug('[qf]', ...a)
+      : () => {},
+    info: (...a) => console.info('[qf]', ...a),
+    warn: (...a) => console.warn('[qf]', ...a),
+    error: (...a) => console.error('[qf]', ...a),
+    enabled: qfDebug,
+  };
+  window.qfLog = qfLog;
+  if (qfDebug) qfLog.info('debug logging enabled');
+
   /* Shift-click rewrites the ``facet`` parameter to ``not_<facet>`` so the
      same HTMX hx-vals payload can serve both include and exclude. */
   document.body.addEventListener('htmx:configRequest', (e) => {
@@ -105,11 +142,10 @@
       setActivityPanel(false);
     }
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && activityPanelOpen) {
-      setActivityPanel(false);
-    }
-  });
+  /* Escape closure for the activity panel is folded into the main
+     Escape chain below (search for "Escape" in the main keydown
+     handler). Keeping a single listener avoids two listeners racing on
+     the same key and makes the priority order explicit. */
   /* htmx fires oobAfterSwap with target = the OOB'd element. When that's
      #qf-activity (or a descendant in the new tree), re-apply our open
      state. The swap drops listeners attached to the OLD button -- the
@@ -153,9 +189,29 @@
   /* Move the latest batch's cards from #qf-batch-staging into #groups. */
   function applyBatchStaging(staging) {
     const groups = document.getElementById('groups');
-    if (!groups || !staging) return;
+    if (!groups || !staging) {
+      qfLog.debug('applyBatchStaging skip', { hasGroups: !!groups, hasStaging: !!staging });
+      return;
+    }
     const isFinal = staging.getAttribute('data-final') === '1';
     const canonical = staging.getAttribute('data-canonical') || '';
+    const childCount = staging.childElementCount;
+    qfLog.debug('applyBatchStaging', {
+      isFinal, childCount,
+      loaded: staging.getAttribute('data-loaded'),
+      total: staging.getAttribute('data-total'),
+    });
+
+    /* Relocate the rule-activation marker before iterating cards. The
+       server emits ``<span id="qf-rule-activation">`` inside the staging
+       div so that a streamed rule preview can mark "this swap is an
+       activation" without an extra OOB target. Without this relocation
+       the marker stays in the staging container and gets discarded on the
+       next OOB swap, so the streaming-path activation never auto-selects
+       flagged rows. The flat (non-streamed) preview already places the
+       marker inside #groups via innerHTML so this is a no-op there. */
+    const marker = staging.querySelector('#qf-rule-activation');
+    if (marker) groups.appendChild(marker);
 
     /* Children are already-rendered .group-card articles. We pick them off
        one at a time so the swap order is preserved if the server happens
@@ -164,6 +220,10 @@
     while (card) {
       const next = card.nextElementSibling;
       const id = card.id;
+      if (id === 'qf-rule-activation') {
+        card = next;
+        continue;
+      }
       if (id) {
         const existing = document.getElementById(id);
         if (existing && existing !== card) {
@@ -194,6 +254,12 @@
         }
       }
       for (const c of toRemove) c.remove();
+      /* Prune stale entries from the selection Map. Hashes whose rows
+         vanished between RESYNCs (deleted in another tab, removed via a
+         qBit-side action we just committed) would otherwise linger in the
+         Map; the footer would advertise rows that no longer exist and a
+         subsequent /torrents/bulk/cleanup would 404 silently. */
+      pruneStaleSelection();
     }
 
     /* Fire synthetic events so the existing handlers (selection re-apply,
@@ -282,6 +348,21 @@
     return Number.isNaN(n) ? 0 : n;
   }
 
+  /* Drop selection entries whose torrent rows are no longer in the DOM.
+     Called after the canonical RESYNC prune and from the MutationObserver
+     on #groups; keeps the footer count and the next bulk-action's hash
+     list honest. */
+  function pruneStaleSelection() {
+    let removed = 0;
+    for (const h of Array.from(selection.keys())) {
+      if (!document.getElementById('torrent-' + h)) {
+        selection.delete(h);
+        removed++;
+      }
+    }
+    if (removed) repaintSelectionFooter();
+  }
+
   function repaintSelectionFooter() {
     const bar = document.getElementById('selection-bar');
     if (!bar) return;
@@ -356,6 +437,7 @@
     if (!h) return;
     if (t.checked) selection.set(h, rowBytes(row));
     else selection.delete(h);
+    qfLog.debug('selection change', { hash: h.slice(0, 8), checked: t.checked, size: selection.size });
     if (row) row.setAttribute('data-marked', t.checked ? 'true' : 'false');
     repaintSelectionFooter();
   });
@@ -856,6 +938,10 @@
     }
 
     if (e.key === 'Escape') {
+      /* Priority order, top-down: arr-history-dialog -> confirm-modal ->
+         cheatsheet -> activity-panel -> filter-drawer -> clear-selection
+         -> blur-search. Each branch calls preventDefault ONLY when it
+         consumes the key, so Escape on an empty page is a no-op. */
       const histDialog = document.getElementById('arr-history-dialog');
       if (histDialog && histDialog.dataset.active === 'true') {
         e.preventDefault();
@@ -864,12 +950,32 @@
       }
       if (confirmOpen()) { e.preventDefault(); closeConfirmDialog(); return; }
       const cs = document.getElementById('kbd-cheatsheet');
-      if (cs && cs.dataset.active === 'true') { toggleCheatsheet(false); return; }
+      if (cs && cs.dataset.active === 'true') {
+        e.preventDefault();
+        toggleCheatsheet(false);
+        return;
+      }
+      if (activityPanelOpen) {
+        e.preventDefault();
+        setActivityPanel(false);
+        return;
+      }
       const drawer = document.getElementById('filter-drawer');
-      if (drawer && drawer.classList.contains('open')) { drawer.classList.remove('open'); return; }
-      if (selection.size > 0) { clearSelection(); return; }
+      if (drawer && drawer.classList.contains('open')) {
+        e.preventDefault();
+        drawer.classList.remove('open');
+        return;
+      }
+      if (selection.size > 0) {
+        e.preventDefault();
+        clearSelection();
+        return;
+      }
       const search = document.getElementById('search-input');
-      if (search && document.activeElement === search) { search.blur(); }
+      if (search && document.activeElement === search) {
+        e.preventDefault();
+        search.blur();
+      }
       return;
     }
     if (typing) return; // all remaining bindings are single-letter; don't fight inputs
@@ -988,13 +1094,15 @@
          off during an RESYNC. */
       const activation = document.getElementById('qf-rule-activation');
       if (activation) {
+        let added = 0;
         target.querySelectorAll('.torrent-row[data-marked="true"]').forEach((row) => {
           if (row.getAttribute('data-keeper') === 'true') return;
           const h = row.getAttribute('data-hash');
-          if (h) selection.set(h, rowBytes(row));
+          if (h) { selection.set(h, rowBytes(row)); added++; }
           const cb = row.querySelector('.row-check');
           if (cb instanceof HTMLInputElement) cb.checked = true;
         });
+        qfLog.debug('rule activation', { slug: activation.getAttribute('data-slug'), added, total: selection.size });
         activation.remove();
       } else {
         /* Re-apply existing selection state to freshly rendered rows. */
@@ -1031,9 +1139,17 @@
     /* Batch-staging OOB swap: relay children into #groups. Synthetic
        afterSwap/oobAfterSwap events dispatched inside applyBatchStaging
        re-enter this listener with target.id === 'groups', so the rest of
-       the flow (selection re-apply, viewport observer) still fires. */
+       the flow (selection re-apply, viewport observer) still fires.
+
+       Run synchronously inside the handler -- htmx's outerHTML OOB swap
+       replaces #qf-batch-staging, so a rAF deferral that runs after the
+       next batch arrives finds itself holding a reference to the detached
+       previous staging div. Two staging divs can collide in one frame
+       under cold-boot load and the rAF closure can never recover the
+       children of the now-orphaned node. Moving N detached cards into
+       #groups is microseconds; rAF buys nothing here. */
     if (target.id === 'qf-batch-staging') {
-      requestAnimationFrame(() => applyBatchStaging(target));
+      applyBatchStaging(target);
       return;
     }
 
@@ -1045,6 +1161,155 @@
   });
 
   document.addEventListener('DOMContentLoaded', repaintSelectionFooter);
+
+  /* =========================================================================
+     Session-state persistence: replay filter + rule selection after the
+     server forgets.
+
+     Subscription state (active filter chips, active rule slug) lives in
+     server-side process memory. Any uvicorn --reload (or crash) drops it.
+     The user's open tab still shows chips as "active" until SSE delivers
+     the freshly-empty chrome OOB swap -- at which point the chips redraw
+     inactive and the user sees the unfiltered 622-group list and asks
+     "why are filters off when the chips look on?".
+
+     Fix: persist the user's selection to localStorage on every successful
+     mutation. On every SSE open, compare the saved selection against the
+     DOM's current pressed chips; if the saved set is non-empty but the
+     DOM shows nothing pressed, the server forgot -- replay each POST so
+     the server's subscription catches up. The next SSE RESYNC then
+     re-renders #groups with the correct subset.
+     ========================================================================= */
+  const SESSION_KEY = 'qf_session_v1';
+
+  function readActiveSelection() {
+    /* Read the server-rendered canonical state from
+       ``.active-filters-strip[data-qf-state]``. The strip is OOB-swapped
+       on every filter mutation, so the JSON it carries always reflects
+       what the server's Subscription thinks is active. Scraping
+       individual chip nodes (multiple classes, hx-vals JSON attrs, etc.)
+       was fragile and missed cases like ``min_torrents``. */
+    const strip = document.querySelector('.active-filters-strip[data-qf-state]');
+    let server = { filters: [], search: '', min_torrents: 1, arr_monitored: 'any', arr_cutoff: 'any' };
+    if (strip) {
+      try { server = JSON.parse(strip.getAttribute('data-qf-state')); } catch (e) {}
+    }
+    const rule = document.querySelector('.rule-chip[aria-pressed="true"]')?.getAttribute('data-slug') || '';
+    return { ...server, rule };
+  }
+
+  function stateIsEmpty(s) {
+    if (!s) return true;
+    return (s.filters || []).length === 0
+      && !(s.search)
+      && (s.min_torrents == null || s.min_torrents <= 1)
+      && (!s.arr_monitored || s.arr_monitored === 'any')
+      && (!s.arr_cutoff || s.arr_cutoff === 'any')
+      && !s.rule;
+  }
+
+  function saveSession() {
+    try {
+      const state = readActiveSelection();
+      if (stateIsEmpty(state)) localStorage.removeItem(SESSION_KEY);
+      else localStorage.setItem(SESSION_KEY, JSON.stringify(state));
+      qfLog.debug('session saved', state);
+    } catch (e) { qfLog.warn('session save failed', e); }
+  }
+
+  /* Persist after every successful filter / rule POST. ``htmx:afterSettle``
+     fires when the response DOM has been swapped + animated, so reading
+     the new pressed-chip state at this point gives us the canonical
+     post-mutation snapshot. */
+  document.body.addEventListener('htmx:afterSettle', (e) => {
+    const url = e.detail && e.detail.requestConfig && e.detail.requestConfig.path;
+    if (!url) return;
+    if (url.startsWith('/filters') || url.startsWith('/rules/')) {
+      saveSession();
+    }
+  });
+
+  function htmxAjax(method, path, values) {
+    /* Promise wrapper around htmx.ajax so we can await each step. The
+       target+swap mirror what the corresponding hx-* attributes on the
+       original buttons use: #groups innerHTML for both /filters and the
+       rule-preview endpoint. htmx runs OOB swaps for active-filters,
+       filter-facets, and rule-bar-slot automatically from the response,
+       so the chrome chips redraw correctly. */
+    return new Promise((resolve) => {
+      if (typeof window.htmx === 'undefined') { resolve(); return; }
+      try {
+        window.htmx.ajax(method, path, {
+          target: '#groups',
+          swap: 'innerHTML',
+          values: values || {},
+        }).then(resolve, () => resolve());
+      } catch (e) { resolve(); }
+    });
+  }
+
+  async function replaySession(state) {
+    qfLog.info('replaying session after server restart', state);
+    /* Run through htmx.ajax so the server's HTML response is swapped
+       into the page (chrome OOBs + target swaps fire). Plain fetch
+       wouldn't update the DOM, which is what produced the "POST went
+       through but cards still wrong" symptom during testing. */
+    try {
+      for (const f of (state.filters || [])) {
+        await htmxAjax('POST', '/filters', { facet: f.facet, value: f.value });
+      }
+      if (state.min_torrents && state.min_torrents > 1) {
+        await htmxAjax('POST', '/filters', { facet: 'min_torrents', value: String(state.min_torrents) });
+      }
+      if (state.arr_monitored && state.arr_monitored !== 'any') {
+        await htmxAjax('POST', '/filters', { facet: 'arr_monitored', value: state.arr_monitored });
+      }
+      if (state.arr_cutoff && state.arr_cutoff !== 'any') {
+        await htmxAjax('POST', '/filters', { facet: 'arr_cutoff', value: state.arr_cutoff });
+      }
+      if (state.search) {
+        await htmxAjax('POST', '/filters/search', { search: state.search });
+      }
+      if (state.rule) {
+        await htmxAjax('POST', '/rules/' + state.rule + '/preview', {});
+      }
+    } catch (e) {
+      qfLog.warn('session replay failed', e);
+    }
+  }
+
+  function maybeReplaySession() {
+    let saved;
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return;
+      saved = JSON.parse(raw);
+    } catch (e) { return; }
+    if (!saved || stateIsEmpty(saved)) return;
+    /* If the server's view already matches what we saved, skip replay. */
+    const current = readActiveSelection();
+    if (stateIsEmpty(current) && !stateIsEmpty(saved)) {
+      qfLog.info('server forgot session, replaying', saved);
+      replaySession(saved);
+    } else {
+      qfLog.debug('session in sync, no replay needed', { current, saved });
+    }
+  }
+
+  /* Wait for the first RESYNC's chrome OOB swap to settle before deciding
+     whether to replay. The synthetic RESYNC fires inside ~100 ms of SSE
+     open; 1500 ms is comfortably past that even on a slow cold-boot. */
+  let sessionSyncTimer = null;
+  document.body.addEventListener('htmx:sseOpen', () => {
+    if (sessionSyncTimer) clearTimeout(sessionSyncTimer);
+    sessionSyncTimer = setTimeout(maybeReplaySession, 1500);
+  });
+  /* Intentionally NOT saving on DOMContentLoaded: a "stale tab" reload
+     after server restart paints the chrome with the EMPTY server state.
+     If we saved here, we'd overwrite the user's previously-persisted
+     filter set with empty, destroying the very state we want to replay.
+     The afterSettle hook on /filters and /rules POSTs already captures
+     every legitimate mutation, so on-load seeding adds nothing useful. */
 
   /* =========================================================================
      SSE connection-state indicator.
@@ -1066,6 +1331,86 @@
       t.classList.remove('qf-enter');
     }
   });
+
+  /* Selection hygiene: when SSE / HTMX removes a torrent row (or a whole
+     group card containing rows), drop the corresponding entries from the
+     in-memory selection Map. Without this, the footer keeps counting
+     deleted torrents and the next /torrents/bulk/cleanup ships stale
+     infohashes to qBit (which silently 404s).
+
+     A MutationObserver is more reliable than relying on the post-swap
+     event listeners: HTMX OOB removes can fire from many paths (per-row
+     delete, group-card delete, RESYNC prune) and they don't all
+     consistently target #groups. Watching the subtree catches every one
+     in a single place at near-zero cost (microtask after mutation).
+
+     This script is inlined BEFORE the streamed ``#groups`` markup, so we
+     can't bind synchronously: at IIFE-eval time ``document.getElementById
+     ('groups')`` is null. Retry on DOMContentLoaded and again on
+     ``htmx:afterSwap`` so the observer attaches as soon as ``#groups``
+     materialises -- whichever event happens first wins. */
+  (function selectionRemovalObserver() {
+    let bound = false;
+    function bind() {
+      if (bound) return;
+      const groups = document.getElementById('groups');
+      if (!groups) return;
+      bound = true;
+      const obs = new MutationObserver((records) => {
+        /* Collect candidate hashes from removed nodes, then verify each
+           one is actually gone from the document before deleting from
+           selection. htmx's innerHTML swap removes the old subtree and
+           inserts a new one in the SAME tick: the MO callback (microtask)
+           sees BOTH the removals (full old tree) AND the additions, but
+           checking ``document.getElementById('torrent-' + h)`` resolves
+           against the current DOM, which by callback-run time already
+           reflects the new tree. So a hash that survived the swap shows
+           up in removedNodes but ALSO has a live element in the DOM --
+           skipping those avoids racing the rule-chip auto-select handler
+           that runs synchronously inside afterSwap before this microtask. */
+        const candidates = new Set();
+        for (const rec of records) {
+          if (rec.type !== 'childList') continue;
+          for (const node of rec.removedNodes) {
+            if (!(node instanceof Element)) continue;
+            if (node.classList && node.classList.contains('torrent-row')) {
+              const h = node.getAttribute('data-hash');
+              if (h) candidates.add(h);
+            } else if (node.querySelectorAll) {
+              node.querySelectorAll('.torrent-row[data-hash]').forEach((r) => {
+                const h = r.getAttribute('data-hash');
+                if (h) candidates.add(h);
+              });
+            }
+          }
+        }
+        let removed = 0;
+        let stillInDom = 0;
+        for (const h of candidates) {
+          if (!selection.has(h)) continue;
+          if (document.getElementById('torrent-' + h)) { stillInDom++; continue; }
+          selection.delete(h);
+          removed++;
+        }
+        if (qfLog.enabled && (candidates.size || removed)) {
+          qfLog.debug('MO prune', {
+            candidates: candidates.size,
+            stillInDom,
+            removed,
+            selectionAfter: selection.size,
+          });
+        }
+        if (removed) {
+          invalidateVisibleCache();
+          repaintSelectionFooter();
+        }
+      });
+      obs.observe(groups, { childList: true, subtree: true });
+    }
+    bind();
+    document.addEventListener('DOMContentLoaded', bind);
+    document.body.addEventListener('htmx:afterSwap', bind);
+  })();
 
   /* =========================================================================
      Viewport observer.

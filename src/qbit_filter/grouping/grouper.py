@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from qbit_filter.domain import GroupKey, GroupKind, Torrent
 from qbit_filter.grouping.parser import ParsedName, normalise_title
+
+logger = logging.getLogger(__name__)
 
 _TAG_PREFIXES = ("tmdb:", "imdb:tt", "imdb:")
 

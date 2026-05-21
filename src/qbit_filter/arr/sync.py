@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -84,90 +85,111 @@ async def _fetch_sonarr_all(
     return series, queue, history, profiles, tag_labels, current
 
 
-async def fetch_once(settings: Settings) -> ArrSnapshot:
+async def fetch_once(
+    settings: Settings, client: httpx.AsyncClient
+) -> ArrSnapshot:
     """Pull one snapshot from whichever *arr instances are configured.
 
     Returns ``ArrSnapshot(ok=False)`` only when no instance is configured;
     a configured-but-unreachable instance produces an ``ok=True`` snapshot
     with empty lists so downstream filters still update (e.g. "Library"
     sidebar still renders, just empty until the next successful poll).
+
+    The caller owns the ``httpx.AsyncClient``: per httpx guidance, the
+    client is created once at task startup and reused across ticks so the
+    connection pool survives and TLS handshakes amortise away. Creating a
+    client per tick visibly stalls the poll under TLS-handshake load.
     """
     radarr_on = bool(settings.radarr_url and settings.radarr_api_key)
     sonarr_on = bool(settings.sonarr_url and settings.sonarr_api_key)
     if not radarr_on and not sonarr_on:
         return ArrSnapshot(ok=False)
 
+    t0 = time.monotonic()
     snap = ArrSnapshot(ok=True)
     snap.radarr_attempted = radarr_on
     snap.sonarr_attempted = sonarr_on
-    async with arr_client.make_client() as client:
-        radarr_task: asyncio.Task[_RadarrFetch] | None = None
-        sonarr_task: asyncio.Task[_SonarrFetch] | None = None
-        if radarr_on:
-            radarr_task = asyncio.create_task(
-                _fetch_radarr_all(client, settings.radarr_url, settings.radarr_api_key)
-            )
-        if sonarr_on:
-            sonarr_task = asyncio.create_task(
-                _fetch_sonarr_all(client, settings.sonarr_url, settings.sonarr_api_key)
-            )
-        if radarr_task is not None:
-            try:
-                (
-                    movies,
-                    r_queue,
-                    r_history,
-                    r_profiles,
-                    r_tags,
-                    r_current,
-                ) = await radarr_task
-                snap.movies = list(movies)
-                snap.radarr_queue = dict(r_queue)
-                snap.radarr_history = dict(r_history)
-                snap.quality_profiles_radarr = dict(r_profiles)
-                snap.radarr_tag_labels = dict(r_tags)
-                snap.radarr_current_download_ids = r_current
-                snap.radarr_fetched = True
-            except arr_client.ArrUnavailable as exc:
-                logger.warning("arr fetch failed for radarr: %s", exc)
-                snap.radarr_error = str(exc)
-            except Exception as exc:
-                logger.exception("arr fetch raised unexpectedly for radarr")
-                snap.radarr_error = f"unexpected error: {exc}"
-        if sonarr_task is not None:
-            try:
-                (
-                    series,
-                    s_queue,
-                    s_history,
-                    s_profiles,
-                    s_tags,
-                    s_current,
-                ) = await sonarr_task
-                snap.series = list(series)
-                snap.sonarr_queue = dict(s_queue)
-                snap.sonarr_history = dict(s_history)
-                snap.quality_profiles_sonarr = dict(s_profiles)
-                snap.sonarr_tag_labels = dict(s_tags)
-                snap.sonarr_current_download_ids = s_current
-                snap.sonarr_fetched = True
-            except arr_client.ArrUnavailable as exc:
-                logger.warning("arr fetch failed for sonarr: %s", exc)
-                snap.sonarr_error = str(exc)
-            except Exception as exc:
-                logger.exception("arr fetch raised unexpectedly for sonarr")
-                snap.sonarr_error = f"unexpected error: {exc}"
+    logger.debug("arr fetch_once start: radarr=%s sonarr=%s", radarr_on, sonarr_on)
+    radarr_task: asyncio.Task[_RadarrFetch] | None = None
+    sonarr_task: asyncio.Task[_SonarrFetch] | None = None
+    if radarr_on:
+        radarr_task = asyncio.create_task(
+            _fetch_radarr_all(client, settings.radarr_url, settings.radarr_api_key)
+        )
+    if sonarr_on:
+        sonarr_task = asyncio.create_task(
+            _fetch_sonarr_all(client, settings.sonarr_url, settings.sonarr_api_key)
+        )
+    if radarr_task is not None:
+        try:
+            (
+                movies,
+                r_queue,
+                r_history,
+                r_profiles,
+                r_tags,
+                r_current,
+            ) = await radarr_task
+            snap.movies = list(movies)
+            snap.radarr_queue = dict(r_queue)
+            snap.radarr_history = dict(r_history)
+            snap.quality_profiles_radarr = dict(r_profiles)
+            snap.radarr_tag_labels = dict(r_tags)
+            snap.radarr_current_download_ids = r_current
+            snap.radarr_fetched = True
+        except arr_client.ArrUnavailable as exc:
+            logger.warning("arr fetch failed for radarr: %s", exc)
+            snap.radarr_error = str(exc)
+        except Exception as exc:
+            logger.exception("arr fetch raised unexpectedly for radarr")
+            snap.radarr_error = f"unexpected error: {exc}"
+    if sonarr_task is not None:
+        try:
+            (
+                series,
+                s_queue,
+                s_history,
+                s_profiles,
+                s_tags,
+                s_current,
+            ) = await sonarr_task
+            snap.series = list(series)
+            snap.sonarr_queue = dict(s_queue)
+            snap.sonarr_history = dict(s_history)
+            snap.quality_profiles_sonarr = dict(s_profiles)
+            snap.sonarr_tag_labels = dict(s_tags)
+            snap.sonarr_current_download_ids = s_current
+            snap.sonarr_fetched = True
+        except arr_client.ArrUnavailable as exc:
+            logger.warning("arr fetch failed for sonarr: %s", exc)
+            snap.sonarr_error = str(exc)
+        except Exception as exc:
+            logger.exception("arr fetch raised unexpectedly for sonarr")
+            snap.sonarr_error = f"unexpected error: {exc}"
+    logger.debug(
+        "arr fetch_once done in %.0f ms: movies=%d series=%d r_queue=%d s_queue=%d",
+        (time.monotonic() - t0) * 1000,
+        len(snap.movies),
+        len(snap.series),
+        len(snap.radarr_queue),
+        len(snap.sonarr_queue),
+    )
     return snap
 
 
-async def poll_arr(settings: Settings) -> AsyncIterator[ArrSnapshot]:
+async def poll_arr(
+    settings: Settings, client: httpx.AsyncClient
+) -> AsyncIterator[ArrSnapshot]:
     """Async generator. First yield happens immediately; subsequent yields are
     spaced by ``settings.arr_poll_interval_seconds``. Cancellation closes the
     loop cleanly.
+
+    The caller owns the ``httpx.AsyncClient`` so the connection pool is reused
+    across ticks (see ``fetch_once`` docstring).
     """
     interval = max(5.0, float(settings.arr_poll_interval_seconds))
     while True:
-        snap = await fetch_once(settings)
+        snap = await fetch_once(settings, client)
         yield snap
         if not snap.ok:
             # Nothing configured -- terminate the iteration so the caller can

@@ -387,18 +387,43 @@ def register_routes(app: FastAPI) -> None:
             # remove the bus entry when one tab closes.
             bus.add(sub)
             sub.sse_refs += 1
+            logger.info(
+                "sse open: sid=%s refs=%d total_subs=%d cold_boot_done=%s",
+                getattr(sub, "sid", "?"),
+                sub.sse_refs,
+                len(bus),
+                store.cold_boot_done,
+            )
             # Push an immediate RESYNC into this client's queue so the very
             # first SSE message delivers the live snapshot. Without this, a
             # client connecting to a quiet qBit instance would stare at the
             # "Loading torrent list..." placeholder until the next reconciler
             # tick, which can be minutes apart. Coalesced via
             # ``last_resync_at`` so back-to-back connects don't double-send.
-            sub.notify(DomainEvent(kind=EventKind.RESYNC))
+            #
+            # During a cold-boot the store only holds the first N chunks; a
+            # full RESYNC here would render with ``data-final=1``, telling
+            # the client to prune any card not in that partial canonical
+            # list. Send RESYNC_PARTIAL until cold-boot finishes so the
+            # streaming path correctly treats this as "more to come".
+            initial_kind = (
+                EventKind.RESYNC
+                if store.cold_boot_done
+                else EventKind.RESYNC_PARTIAL
+            )
+            sub.notify(DomainEvent(kind=initial_kind))
             try:
                 yield ": connected\n\n"
                 while True:
-                    if await request.is_disconnected():
-                        break
+                    # No explicit ``request.is_disconnected()`` peek: when the
+                    # client closes, Starlette cancels this generator and the
+                    # awaiting ``queue.get()`` / ``yield`` raises
+                    # ``CancelledError`` (or ``ClientDisconnect``), which the
+                    # ``finally:`` below already handles via refcount + bus
+                    # removal. A stale client that hasn't fully RST'd is
+                    # detected on the next ping write or within
+                    # ``SSE_PING_INTERVAL`` -- acceptable HTTP-keepalive
+                    # latency.
                     try:
                         first = await asyncio.wait_for(
                             sub.queue.get(), timeout=SSE_PING_INTERVAL
@@ -429,6 +454,12 @@ def register_routes(app: FastAPI) -> None:
                             await asyncio.sleep(0)
             finally:
                 sub.sse_refs -= 1
+                logger.info(
+                    "sse close: sid=%s refs=%d total_subs=%d",
+                    getattr(sub, "sid", "?"),
+                    sub.sse_refs,
+                    len(bus),
+                )
                 if sub.sse_refs <= 0:
                     bus.remove(sub)
                     sub.drain()
@@ -1330,6 +1361,14 @@ def _emit_resync_batches(
             f'data-canonical="{canonical_slugs if carries_final_flag else ""}">'
             f'{cards}'
             f'</div>'
+        )
+        logger.debug(
+            "sse batch %d: loaded=%d/%d final=%s cards=%d",
+            batch_n,
+            end,
+            total,
+            carries_final_flag,
+            end - idx,
         )
 
         parts = [staging]

@@ -7,10 +7,13 @@ suitable for running on every torrent on every reconciler tick.
 
 from __future__ import annotations
 
+import logging
 import re
 from functools import lru_cache
 
 from qbit_filter.domain import Quality, QualityTier
+
+logger = logging.getLogger(__name__)
 
 _RES_2160 = re.compile(r"(?<![A-Za-z0-9])(?:2160p|4k|uhd)(?![A-Za-z0-9])", re.IGNORECASE)
 _RES_1080 = re.compile(r"(?<![A-Za-z0-9])1080p(?![A-Za-z0-9])", re.IGNORECASE)

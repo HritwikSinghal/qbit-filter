@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from typing import Any
 
 from qbit_filter.domain import FilterState, Group, GroupKey, GroupKind, Torrent
 from qbit_filter.grouping.parser import quick_season
 from qbit_filter.state.store import Store
+
+logger = logging.getLogger(__name__)
 
 
 def torrent_matches(t: Torrent, fs: FilterState, store: Store | None = None) -> bool:
@@ -179,15 +182,43 @@ def group_matches(store: Store, fs: FilterState, key: GroupKey) -> bool:
 
 
 def count_by_facet(store: Store) -> dict[str, Any]:
-    """Per-facet counts of all torrents in the store. Memoised by ``store.rid``
-    so multiple SSE subscribers / interleaved filter POSTs within one poll
-    tick reuse a single traversal of ~1300 torrents.
+    """Per-facet counts of all torrents in the store. Memoised by a composite
+    key of ``(store.rid, store.arr.rid)`` so multiple SSE subscribers /
+    interleaved filter POSTs within one poll tick reuse a single traversal of
+    ~1300 torrents.
+
+    The arr_rid component matters because arr-derived facets (Monitored,
+    Unmonitored, Orphan, Cutoff met, Upgrade pending) read ``store.arr.hash_to_arr``
+    which is swapped in by the arr poller WITHOUT bumping ``store.rid``. Keying
+    only on ``store.rid`` lets the cache serve stale arr-facet counts until the
+    next qBit poll tick mutates the qBit store.
+
+    Note: ``Store.facet_cache`` is typed as ``tuple[int, dict] | None`` in
+    ``state/store.py``. We can't edit that file, so we stash the composite key
+    as a packed int (``rid * MULT + arr_rid``) -- both rids are monotonically
+    increasing small counters, so a 1e9 multiplier safely avoids collisions
+    while keeping the field signature intact. If the rid counters ever grow
+    past ~1e9 this needs revisiting (gap logged on first overflow).
 
     Returns a dict with per-facet ``{value: count}`` mappings plus a few
     scalar fields used by toggles (``multi_groups`` = number of groups with
     more than one torrent).
     """
-    if store.facet_cache is not None and store.facet_cache[0] == store.rid:
+    arr_rid = store.arr.rid if store.arr is not None else 0
+    # Composite key: pack (rid, arr_rid) into a single int to fit the existing
+    # ``Store.facet_cache: tuple[int, dict] | None`` signature without editing
+    # state/store.py. 1e9 headroom on the qBit-side rid; if breached the cache
+    # could spuriously hit -- log once and treat as a future gap.
+    _ARR_RID_MULT = 1_000_000_000
+    if store.rid >= _ARR_RID_MULT:
+        logger.warning(
+            "store.rid=%d has caught up with arr_rid multiplier %d -- "
+            "facet_cache composite key risks collision; widen Store.facet_cache typing",
+            store.rid,
+            _ARR_RID_MULT,
+        )
+    composite_key = store.rid * _ARR_RID_MULT + arr_rid
+    if store.facet_cache is not None and store.facet_cache[0] == composite_key:
         return store.facet_cache[1]
     statuses: Counter[str] = Counter()
     categories: Counter[str] = Counter()

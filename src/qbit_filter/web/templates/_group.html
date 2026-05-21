@@ -21,12 +21,38 @@
 {% set _arr_matches = arr_matches if arr_matches is defined else {} %}
 {% set _title = (_arr.title if _arr and _arr.title else group.title) %}
 {% set _year = (_arr.year if _arr and _arr.year else group.year) %}
+{# Hoisted up here (also re-set further down to keep the existing flow):
+   the article-tag class needs to know whether this card will render as a
+   compare-strip, so we can disable ``content-visibility: auto`` on it. #}
+{% set _hoist_marks = rule_marks | default({}) %}
+{% set _hoist_keepers = rule_keepers | default([]) %}
+{% set _has_compare = _hoist_marks and _hoist_keepers %}
 {% set _arr_link = '' %}
 {% if _arr %}
   {% if _arr.source == 'radarr' and _arr.title_slug %}{% set _arr_link = '/movie/' + _arr.title_slug %}{% endif %}
   {% if _arr.source == 'sonarr' and _arr.title_slug %}{% set _arr_link = '/series/' + _arr.title_slug %}{% endif %}
 {% endif %}
-<article id="group-{{ group.key.slug() }}" class="group-card{% if _arr %} has-arr arr-{{ _arr.source }}{% endif %}"
+{#  ``contain-intrinsic-size`` placeholder for ``content-visibility: auto``.
+    Row height is 56px (--row-h); meta panel is ~140px minimum. Compute the
+    expected height per card so off-screen cards don't reserve the universal
+    480px placeholder -- that fallback was the source of the "UI jumps as I
+    scroll" feel: a 1-torrent card is ~140px but the placeholder claims
+    480px, so when it scrolls into view everything below shifts up by 340px.
+    Per-card sizing brings the placeholder within ~20px of reality for the
+    common 1-3 torrent groups; the ``auto`` keyword still lets the browser
+    capture the true measured size for subsequent passes.
+
+    Compare-strip cards (rule preview with keepers+flagged) get
+    ``content-visibility: visible`` via a CSS class: their height depends
+    on factor-pill wrapping which we can't predict server-side, so a wrong
+    placeholder there causes 20-60px of cumulative shift as the user
+    scrolls through. The rule-active subset is small (single/double-digit
+    groups) so painting them all is cheap. #}
+{% set _est_h = (torrents | length * 56 + 12) %}
+{% if _est_h < 140 %}{% set _est_h = 140 %}{% endif %}
+<article id="group-{{ group.key.slug() }}"
+  class="group-card{% if _has_compare %} no-cv{% endif %}{% if _arr %} has-arr arr-{{ _arr.source }}{% endif %}"
+  style="contain-intrinsic-size: auto {{ _est_h }}px;"
   {% if _arr %}data-arr-source="{{ _arr.source }}" data-arr-id="{{ _arr.entity_id }}"{% endif %}>
   <div class="group-meta">
     {% if _arr and _arr.poster_url %}

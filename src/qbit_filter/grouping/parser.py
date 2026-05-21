@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from typing import Any, Literal
 import guessit  # type: ignore[import-untyped]
 
 from qbit_filter.grouping import parse_cache
+
+logger = logging.getLogger(__name__)
 
 _LEADING_ARTICLES = {"the", "a", "an"}
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")

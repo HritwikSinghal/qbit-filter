@@ -7,6 +7,7 @@ user confirms; only on confirm does ``qbit/actions.delete`` run.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
@@ -21,6 +22,8 @@ from qbit_filter.domain import (
 )
 from qbit_filter.grouping.parser import quick_season
 from qbit_filter.state.store import Store
+
+logger = logging.getLogger(__name__)
 
 FactorKind = Literal["bad", "good", "neutral", "warning"]
 Severity = Literal["normal", "warning"]

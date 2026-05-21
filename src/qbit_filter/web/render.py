@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
@@ -15,6 +17,8 @@ from qbit_filter.state.views import (
     seasons_of,
     torrents_for_group,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _arr_meta_for_group(store: Store, torrents: list[Torrent]) -> ArrMatch | None:

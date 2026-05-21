@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from qbit_filter.domain import FilterState, TorrentStatus
+
+logger = logging.getLogger(__name__)
 
 Facet = Literal[
     "status", "category", "tag", "tracker", "search", "min_torrents",

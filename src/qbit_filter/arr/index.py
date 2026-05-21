@@ -320,6 +320,34 @@ def build_index(
     sonarr_current = snapshot.sonarr_current_download_ids
 
     out: dict[str, ArrMatch] = {}
+    via_counts = {"tag": 0, "queue": 0, "history": 0, "title": 0}
+    # Tracks which (source, entity_id) pair has already been claimed by an
+    # earlier (higher-precedence) match so the title-fallback step can warn
+    # when it would re-claim the same arr entity from a different torrent.
+    # Two torrents legitimately mapping to the same entity (re-release,
+    # cross-seed) is benign for the index but worth surfacing in logs --
+    # almost all rule miscounts trace back to one of these.
+    entity_claimed: dict[tuple[str, int], tuple[str, str]] = {}
+
+    def _claim(match: ArrMatch, hash_: str, torrent_name: str) -> None:
+        key = (match.source, match.entity_id)
+        prior = entity_claimed.get(key)
+        if prior is not None and match.via == "title":
+            prior_hash, prior_via = prior
+            logger.warning(
+                "title fallback collision: hash=%s name=%r resolves to "
+                "%s entity_id=%d (title=%r), already claimed by hash=%s via=%s",
+                hash_[:8],
+                torrent_name,
+                match.source,
+                match.entity_id,
+                match.title,
+                prior_hash[:8],
+                prior_via,
+            )
+        else:
+            entity_claimed[key] = (hash_, match.via)
+
     for t in torrents:
         h = t.hash.lower()
 
@@ -339,6 +367,7 @@ def build_index(
         )
         if match is not None:
             out[h] = match
+            _claim(match, h, t.name)
             continue
 
         # 2. Radarr queue (currently-downloading torrents).
@@ -346,7 +375,7 @@ def build_index(
         if r_queue_rec is not None:
             movie = movies_by_id.get(r_queue_rec.entity_id)
             if movie is not None:
-                out[h] = _movie_match(
+                match = _movie_match(
                     movie,
                     "queue",
                     queue=r_queue_rec,
@@ -354,6 +383,8 @@ def build_index(
                     tag_labels=radarr_tags,
                     arr_current=h in radarr_current,
                 )
+                out[h] = match
+                _claim(match, h, t.name)
                 continue
 
         # 3. Sonarr queue.
@@ -361,7 +392,7 @@ def build_index(
         if s_queue_rec is not None:
             series = series_by_id.get(s_queue_rec.entity_id)
             if series is not None:
-                out[h] = _series_match(
+                match = _series_match(
                     series,
                     "queue",
                     queue=s_queue_rec,
@@ -369,6 +400,8 @@ def build_index(
                     tag_labels=sonarr_tags,
                     arr_current=h in sonarr_current,
                 )
+                out[h] = match
+                _claim(match, h, t.name)
                 continue
 
         # 4. Radarr history.
@@ -376,7 +409,7 @@ def build_index(
         if r_hist is not None:
             movie = movies_by_id.get(r_hist.entity_id)
             if movie is not None:
-                out[h] = _movie_match(
+                match = _movie_match(
                     movie,
                     "history",
                     queue=radarr_queue.get(h),
@@ -384,6 +417,8 @@ def build_index(
                     tag_labels=radarr_tags,
                     arr_current=h in radarr_current,
                 )
+                out[h] = match
+                _claim(match, h, t.name)
                 continue
 
         # 5. Sonarr history.
@@ -391,7 +426,7 @@ def build_index(
         if s_hist is not None:
             series = series_by_id.get(s_hist.entity_id)
             if series is not None:
-                out[h] = _series_match(
+                match = _series_match(
                     series,
                     "history",
                     queue=sonarr_queue.get(h),
@@ -399,6 +434,8 @@ def build_index(
                     tag_labels=sonarr_tags,
                     arr_current=h in sonarr_current,
                 )
+                out[h] = match
+                _claim(match, h, t.name)
                 continue
 
         # 6. Title fallback (optional).
@@ -419,4 +456,16 @@ def build_index(
             )
             if match is not None:
                 out[h] = match
+                _claim(match, h, t.name)
+    for match_ in out.values():
+        via_counts[match_.via] = via_counts.get(match_.via, 0) + 1
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "build_index: total=%d tag=%d queue=%d history=%d title=%d",
+            len(out),
+            via_counts.get("tag", 0),
+            via_counts.get("queue", 0),
+            via_counts.get("history", 0),
+            via_counts.get("title", 0),
+        )
     return out

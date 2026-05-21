@@ -78,6 +78,11 @@ class Subscription:
         try:
             self.queue.put_nowait(event)
         except asyncio.QueueFull:
+            logger.warning(
+                "subscription queue overflow (max=%d, kind=%s); collapsing to RESYNC",
+                self.max_queue,
+                event.kind.name,
+            )
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.queue.get_nowait()
             try:

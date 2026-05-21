@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from qbit_filter.arr import client as arr_client
 from qbit_filter.arr.index import build_index
 from qbit_filter.arr.models import ArrSnapshot
 from qbit_filter.arr.sync import poll_arr
@@ -60,8 +61,21 @@ async def _poller(
     store: Store = app.state.store
     store.qbit_host = settings.qbittorrent_host
     _append_activity(store, f"Connecting to qBittorrent at {settings.qbittorrent_host}")
+    # connect() blocks on a thread that ``asyncio.to_thread`` cannot
+    # cancel; without a timeout, a hung qBit (paused container, slow DNS,
+    # firewall) blocks lifespan shutdown indefinitely. 15s is comfortably
+    # above a healthy login round-trip and short enough to surface a
+    # hung instance during ``uvicorn --reload`` and Ctrl+C.
     try:
-        client = await asyncio.to_thread(connect, settings)
+        client = await asyncio.wait_for(
+            asyncio.to_thread(connect, settings), timeout=15.0
+        )
+    except TimeoutError:
+        logger.error("qBit connect timed out; poller exiting")
+        store.qbit_connected = False
+        store.qbit_last_error = "connect timeout (15s)"
+        _append_activity(store, "qBittorrent connect timed out (15s)")
+        return
     except Exception as exc:
         logger.exception("could not connect to qBittorrent; poller exiting")
         store.qbit_connected = False
@@ -72,7 +86,20 @@ async def _poller(
     store.qbit_connected = True
     store.qbit_last_error = ""
     _append_activity(store, "qBittorrent connected -- subscribing to sync/maindata")
-    async for delta in poll(client, settings):
+    logger.info("qbit poller: connected, entering poll loop")
+    # Track the previously-reported health so we only log the
+    # healthy<->degraded edge, not every tick.
+    last_failures = 0
+    async for delta in poll(client, settings, store):
+        logger.debug(
+            "qbit poll tick: rid=%d full=%s added=%d changed=%d removed=%d failures=%d",
+            delta.rid,
+            delta.full_update,
+            len(delta.added),
+            len(delta.changed),
+            len(delta.removed),
+            store.qbit_consecutive_failures,
+        )
         try:
             await reconciler.apply(delta)
         except Exception as exc:
@@ -82,6 +109,17 @@ async def _poller(
         store.qbit_last_poll_at = time.time()
         store.qbit_poll_count += 1
         store.qbit_last_error = ""
+        # Healthy<->degraded transitions surface in the activity log.
+        # ``poll()`` resets ``qbit_consecutive_failures`` to 0 on a
+        # successful tick, so by the time we get here for a successful
+        # delta, ``store.qbit_consecutive_failures`` is 0 and
+        # ``last_failures`` carries the count before this tick.
+        if last_failures > 0 and store.qbit_consecutive_failures == 0:
+            _append_activity(
+                store,
+                f"qBittorrent recovered after {last_failures} failed poll(s)",
+            )
+        last_failures = store.qbit_consecutive_failures
 
 
 async def _arr_poller(
@@ -121,11 +159,31 @@ async def _arr_poller(
     class _QbitListener:
         """Subscriber on the qBit/arr bus that wakes the rebuild loop on
         qBit-side RESYNCs. Ignores the arr-side RESYNCs we publish below so
-        we don't ping-pong."""
+        we don't ping-pong.
+
+        Suppresses RESYNC_PARTIAL until cold-boot finishes. The reconciler
+        emits one per chunk (every ~50-150 ms); reacting to each one would
+        fire a full ``build_index`` + bus.publish(RESYNC) fan-out per chunk
+        -- a thundering herd across SSE clients during the noisiest window
+        of the app's lifetime. Waiting for the terminal RESYNC lets us
+        index against the complete torrent set once and pay one fan-out.
+        """
 
         def notify(self, event: DomainEvent) -> None:
-            if event.kind in (EventKind.RESYNC, EventKind.RESYNC_PARTIAL):
+            if event.kind == EventKind.RESYNC or (
+                event.kind == EventKind.RESYNC_PARTIAL
+                and store.cold_boot_done
+            ):
+                logger.debug(
+                    "arr listener: waking on %s (cold_boot_done=%s)",
+                    event.kind.name,
+                    store.cold_boot_done,
+                )
                 qbit_resync_event.set()
+            elif event.kind == EventKind.RESYNC_PARTIAL:
+                logger.debug(
+                    "arr listener: ignoring RESYNC_PARTIAL during cold-boot"
+                )
 
     listener = _QbitListener()
     bus.add(listener)
@@ -179,10 +237,27 @@ async def _arr_poller(
         match count for logging."""
         if last_snapshot is None:
             return 0
+        # Snapshot the torrent values into a tuple before calling build_index.
+        # Both pollers share the loop; ``Reconciler.apply`` yields at
+        # ``await asyncio.to_thread(_warm_parse_cache, ...)`` and the chunked
+        # cold-boot path clears+rebuilds ``store.torrents`` between yields.
+        # Passing a live ``.values()`` view here lets build_index walk a dict
+        # that the reconciler may then mutate while we're awaiting -- the
+        # classic ``dictionary changed size during iteration`` race.
+        torrents_snap = tuple(store.torrents.values())
+        t0 = time.monotonic()
         new_index = build_index(
             last_snapshot,
-            store.torrents.values(),
+            torrents_snap,
             title_fallback=settings.arr_title_fallback,
+        )
+        logger.debug(
+            "arr rebuild: torrents=%d -> matches=%d (%.0f ms, qbit_rid=%d, arr_rid=%d)",
+            len(torrents_snap),
+            len(new_index),
+            (time.monotonic() - t0) * 1000,
+            store.rid,
+            arr_store.rid,
         )
         # Atomic dict-reference swap so concurrent readers (template render
         # under SSE) see either the old dict or the new one whole -- never
@@ -199,13 +274,30 @@ async def _arr_poller(
         )
         arr_store.radarr_match_count = radarr_matches
         arr_store.sonarr_match_count = sonarr_matches
-        bus.remove(listener)
+        # Remove our own listener before publishing so the RESYNC we emit
+        # below doesn't re-enter qbit_resync_event and re-trigger this
+        # rebuild. ``EventBus.remove`` uses ``set.discard`` (idempotent),
+        # so a stray double-remove from a racing tick is harmless.
+        # ``bus.add(listener)`` MUST run regardless of how ``remove`` /
+        # ``publish`` go -- wrapping each in its own try/finally ensures
+        # we never leave the listener un-registered, which would silently
+        # stop the arr poller from reacting to qBit RESYNCs.
+        logger.debug("arr rebuild publish: removing listener")
         try:
-            bus.publish(DomainEvent(kind=EventKind.RESYNC))
-        except Exception:
-            logger.exception("arr poller: bus.publish raised")
+            try:
+                bus.remove(listener)
+            except Exception:
+                logger.exception("arr poller: bus.remove raised")
+            try:
+                bus.publish(DomainEvent(kind=EventKind.RESYNC))
+            except Exception:
+                logger.exception("arr poller: bus.publish raised")
         finally:
-            bus.add(listener)
+            try:
+                bus.add(listener)
+                logger.debug("arr rebuild publish: re-added listener")
+            except Exception:
+                logger.exception("arr poller: bus.add raised (listener lost!)")
         return len(new_index)
 
     def _log_arr_state_change(snapshot: ArrSnapshot) -> None:
@@ -255,7 +347,7 @@ async def _arr_poller(
                 )
 
     async def arr_fetch_loop() -> None:
-        async for snapshot in poll_arr(settings):
+        async for snapshot in poll_arr(settings, http_client):
             _apply_snapshot(snapshot)
             _log_arr_state_change(snapshot)
             qbit_rid = store.rid
@@ -306,6 +398,11 @@ async def _arr_poller(
                 "arr index re-built from qBit RESYNC: %d matches", matches
             )
 
+    # One client for the whole task lifetime. httpx explicitly recommends
+    # reusing the same AsyncClient across many requests so the connection
+    # pool survives and TLS handshakes are amortised across ticks.
+    # ``follow_redirects`` mirrors the ``make_client`` default.
+    http_client = arr_client.make_client()
     try:
         await asyncio.gather(arr_fetch_loop(), qbit_reindex_loop())
     except asyncio.CancelledError:
@@ -314,6 +411,8 @@ async def _arr_poller(
         logger.exception("arr poller raised; task exiting")
     finally:
         bus.remove(listener)
+        with contextlib.suppress(Exception):
+            await http_client.aclose()
 
 
 @asynccontextmanager
@@ -343,6 +442,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Shutdown order matters:
+        # 1. Cancel pollers + await them so no more events publish.
+        # 2. Drain SSE subscriber queues so any in-flight events don't
+        #    fire across the qBit logout boundary and so the per-client
+        #    queues release their buffers promptly.
+        # 3. Log out of qBit on a worker thread.
+        # 4. Persist the parser cache.
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
@@ -350,6 +456,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             arr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await arr_task
+        subscriptions = getattr(app.state, "subscriptions", None) or {}
+        for sub in list(subscriptions.values()):
+            with contextlib.suppress(Exception):
+                sub.drain()
         client = app.state.qbit
         if client is not None:
             with contextlib.suppress(Exception):

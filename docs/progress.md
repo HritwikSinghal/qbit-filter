@@ -1,31 +1,94 @@
 # Project: qbit-filter
-> Last updated: 2026-05-21 | Session: 9
+> Last updated: 2026-05-21 | Session: 10
 
 ## Current state
 
-**Phase 12 (cache removal + chunked cold-boot streaming) committed
-in `13d289d`.** The localStorage paint-from-cache trick is gone.
-Cold-boot now streams real data: qBit `sync/maindata` is post-fetch
-chunked into 200-torrent slices (`Settings.qbit_cold_boot_chunk_size`,
-env `QBIT_COLD_BOOT_CHUNK_SIZE`); each chunk parses + groups + publishes
-`EventKind.RESYNC_PARTIAL`. The SSE renderer treats partials like RESYNC
-but with a 100 ms floor instead of the 1 s coalesce window, so the first
-~100 group cards reach the browser within a few hundred ms of qBit
-responding (not after the full ~1310-torrent rebuild).
+**Session 10 reliability + UX sweep (uncommitted)** -- focused
+architectural review followed by a batch of P0/P1 fixes. Nothing new
+on the feature roadmap; this session shored up the event-loop
+plumbing, killed a visible layout-shift class, and added a
+client-side replay so filter selections survive uvicorn `--reload`.
+22 files modified, +874 / -102 lines. ruff clean. mypy back to the
+two pre-existing `arr/client.py:540,557` errors -- not introduced
+this session.
 
-`_arr_poller` was restructured into two cooperating loops
-(`asyncio.gather`): the existing 60 s `arr_fetch_loop`, plus
-`qbit_reindex_loop` that wakes on every qBit RESYNC/RESYNC_PARTIAL,
-debounces 250 ms, and re-runs `build_index` against the cached arr
-snapshot. `hash_to_arr` swaps atomically (build new dict, assign whole)
-so concurrent template reads never see a half-mutated state. Ping-pong
-avoided by the listener removing itself from the bus before publishing
-its own RESYNC.
-
-Bonus: `DEV_MODE=true` in `.env` wires `python -m qbit_filter` to
-`uvicorn --reload` watching `src/qbit_filter/`. Combined with the
-existing `livereload.js` (`/dev/version` poll), it gives true
-hot-reload for .py/.html edits.
+Headline fixes:
+- **No more dict-iter-while-mutate race in `_rebuild_index_and_publish`**
+  (`app.py:189`): now snapshots `tuple(store.torrents.values())`
+  before passing to `build_index`. The reconciler yields the loop on
+  `to_thread(_warm_parse_cache)` and the chunked cold-boot's
+  `store.torrents.clear()` was free to fire between the snapshot and
+  the iteration.
+- **Cold-boot RESYNC storm gone.** `_arr_poller._QbitListener` ignores
+  `RESYNC_PARTIAL` until `store.cold_boot_done` so the arr poller no
+  longer fires a fresh `build_index` + bus.publish(RESYNC) fan-out per
+  chunk -- one terminal RESYNC instead of N partial-triggered rebuilds.
+- **Long-lived `httpx.AsyncClient`** owned by `_arr_poller` lifetime
+  (was created per `fetch_once` tick, defeating connection pooling).
+- **Uncancellable thread-calls bounded.** `asyncio.wait_for` wraps the
+  `connect()` (15 s) and `sync_maindata` (30 s) `to_thread` calls so a
+  hung qBit can't pin lifespan shutdown indefinitely.
+- **qBit poll backoff.** `Store.qbit_consecutive_failures` + capped
+  exponential sleep in `qbit/sync.py:poll()` (base * 2^min(N-1,6),
+  cap 60 s). Healthy<->degraded transitions log to the activity panel.
+- **Lifespan shutdown order**: cancel pollers, await -> drain SSE
+  subscriber queues -> qBit logout -> persist parser cache.
+- **Per-card `contain-intrinsic-size`** (`_group.html` computes
+  `max(140, 56 * torrents + 12)`). Compare-strip cards (rule preview
+  with keepers + flagged) opt out of `content-visibility: auto` via
+  `.no-cv` class -- factor-pill wrapping makes their height
+  unpredictable. `html, body { scrollbar-gutter: stable;
+  overflow-anchor: auto }`. CLS measured at 0 unexpected drift on
+  scroll under load.
+- **MutationObserver race fixed.** htmx innerHTML swaps remove the
+  old subtree (including the hashes we just auto-selected) and
+  insert the new one in the same tick. The MO microtask fires AFTER
+  afterSwap, so the auto-select would land first, then the MO would
+  see those same hashes in `removedNodes` and delete them. Fix:
+  re-check `document.getElementById('torrent-' + h)` before deleting
+  -- a hash whose row was "removed-and-replaced" survives.
+- **MutationObserver attach** now retries on `DOMContentLoaded` +
+  `htmx:afterSwap` because `keys.js` is inlined BEFORE
+  `<!--QF_STREAM_INSERT-->`, so `#groups` doesn't exist at IIFE-eval
+  time.
+- **Drop `rAF(applyBatchStaging)`**: outerHTML OOB swap replaces
+  `#qf-batch-staging`; the rAF closure held a detached prior node and
+  could orphan its children under cold-boot load.
+- **`is_disconnected()` peek dropped** in the SSE handler. Generator
+  cancellation handles disconnects via the existing `finally`.
+- **`count_by_facet` cache key** now includes `store.arr.rid`. Arr
+  poller swaps in `hash_to_arr` without bumping `store.rid`; stale
+  cached arr-facet counts were possible.
+- **`arr/index.py` title-fallback collision** logs a WARNING when a
+  title-only match would re-claim an entity already linked via
+  tag/queue/history. Helps debug "rule miscounts a torrent".
+- **`keys.js` Escape unified**. Single chain:
+  arr-history-dialog -> confirm-modal -> cheatsheet -> activity-panel
+  -> filter-drawer -> clear-selection -> blur-search. Each branch
+  calls `preventDefault` only when it consumes the key.
+- **FilterState session-replay**. `_active_filters.html` emits the
+  canonical FilterState as `data-qf-state` JSON. `keys.js`
+  persists to `localStorage[qf_session_v1]` on every successful
+  `/filters*` or `/rules/*/preview` POST. On SSE open, if the saved
+  state is non-empty AND the server's current state (read from the
+  same data-qf-state) is empty, the client re-POSTs via `htmx.ajax`
+  so the chrome chip OOBs swap correctly. Pre-existing UX
+  cliff: any uvicorn `--reload` (or process restart) drops in-memory
+  Subscriptions; the user's open tab still showed pressed chips
+  while the server delivered the unfiltered view. This now self-heals.
+- **Debug logging baseline**. `qfLog` JS namespace gated on
+  `?qf_debug=1` or `localStorage.qf_debug='1'`. Instruments
+  MutationObserver pruning, batch-staging boundaries, rule
+  activation, selection lifecycle. Server-side: structured DEBUG
+  calls in `_poller`, `_QbitListener.notify`,
+  `_rebuild_index_and_publish` (with timing), reconciler chunked
+  cold-boot, events.bus.publish (subscriber count),
+  subscribers._enqueue overflow, SSE stream open/close + batch
+  boundaries, arr/sync timings, arr/index build_index via-counts.
+  Set `LOG_LEVEL=debug` in `.env` to enable.
+- **Prior session-9 work intact** (cold-boot streaming, arr poller
+  ping-pong avoidance, DEV_MODE auto-reload) -- those still
+  describe steady-state behaviour.
 
 **Baseline.** ~1310 torrents -> ~622 groups on production qBit. `GET /`
 is a `StreamingResponse`: head + chrome + sidebar flushed first, group
@@ -34,45 +97,76 @@ buffer, marker at `<!--QF_STREAM_INSERT-->`. SSE keeps the page warm.
 Empty first-paint affordance is the SSE-driven "Loading torrent
 list..." progress block.
 
-### Pickup priorities
+### Pickup priorities (in order)
 
-1. **Verify Phase 12 cold-boot live.** Boot the app, throttle DevTools
-   to Fast 3G, confirm first batch of group cards appears within
-   ~500 ms of `/` returning. Confirm no `qf_has_cache` cookie or
-   `qf_groups_cache_v*` localStorage anywhere. Hard-reload, confirm
-   identical first-paint timing (no cache magic).
+1. **Commit session 10's bug-fix sweep.** 22 files dirty, no commits
+   yet. `git diff --stat` shows the scope. Suggested split:
+   - `fix(event-loop): harden qBit/arr pollers and SSE lifecycle`
+     (P0-1..P0-3, P0-5, lifespan drain, listener wrapping, backoff)
+   - `fix(ui): kill layout shift on data fetch` (per-card
+     intrinsic-size + .no-cv + scrollbar-gutter)
+   - `fix(ui): MO race + rAF cold-boot bug + Escape unify + session
+     replay` (keys.js cluster)
+   - `chore(logging): structured debug logs across hot paths`
+   - `docs: session 10 handoff`
 
-2. **Phase 11 follow-ups** (independently landable):
-   - **Identity-based regrouping** -- merge two qBit groups sharing a
-     TMDB/TVDB id (e.g. "Dune 2021" / "Dune Part One 2021"). Post-pass
-     in `state/views.py` after `apply_filters`; grouper stays pure.
-   - **Sonarr-aware season grid** -- replace flat `[S01][S02]` chips
-     with `[S01 OK 10/10][S03 X 7/10]`. Data already on
-     `ArrSeries.season_monitored` + `episode_file_count` /
-     `total_episode_count`; needs `_season_grid.html` partial.
-   - **Below-cutoff anti-rule** -- warn (yellow severity factor) when
+2. **Live-verify reliability changes against the real qBit instance.**
+   The Playwright smokes hit a live ~1310-torrent catalogue and went
+   green, but the cold-boot RESYNC suppression and httpx-pool reuse
+   want eyes on a fresh boot:
+   - Kill the server. Boot fresh. Watch the activity log: should see
+     one "Linked N torrents" line, NOT N "Refreshed arr index" lines
+     during cold-boot chunks.
+   - Stop Radarr mid-session; confirm qBit panel keeps updating; arr
+     logs WARNING "fetch failed"; recovery on Radarr return surfaces
+     in the activity log.
+   - Pull the LAN cable for 30 s; confirm `qbit_consecutive_failures`
+     climbs, sleep grows (visible in debug log), "qBittorrent
+     recovered after N failed poll(s)" appears on reconnect.
+
+3. **Phase 11 follow-ups** (independently landable, same as session 9):
+   - **Identity-based regrouping** -- merge qBit groups sharing a
+     TMDB/TVDB id. Post-pass in `state/views.py` after `apply_filters`.
+   - **Sonarr-aware season grid** -- replace `[S01][S02]` chips with
+     `[S01 OK 10/10][S03 X 7/10]`. Needs `_season_grid.html` partial.
+   - **Below-cutoff anti-rule** -- warn factor (yellow) when
      `SupersededQualityRule` would mark a 1080p but arr is searching
-     for an upgrade (`quality_cutoff_met == False`). Not a separate
-     rule chip.
+     for an upgrade. Not a separate rule chip.
    - **Open in Radarr/Sonarr deep-link** -- kebab menu item using
-     `arr_meta.title_slug` + `radarr_url` / `sonarr_url` already on
-     `ArrStore`.
+     `arr_meta.title_slug` + `radarr_url` / `sonarr_url`.
 
-3. **Poster proxy `/poster/{src}/{id}`.** ~50 LOC async route in
+4. **Structural refactors flagged by session-10 arch review (P1):**
+   - `web/routes.py` is 1600 lines, 7 distinct responsibilities.
+     Extract activity widget, SSE protocol, rule preview helpers
+     into separate modules. Adding new cleanup rules will be painful
+     until this lands.
+   - `state/store.py` `Store` mixes canonical state, telemetry,
+     memoisation. Split into `Store` (canonical), `Telemetry`
+     (poller-owned), `FacetCache` (views-owned).
+   - `cleanup/rules.py` is 797 lines, one-file-many-rules. Move each
+     rule to `cleanup/rules/<slug>.py`, shared scoring helpers to
+     `cleanup/scoring.py`. Registry auto-imports via `pkgutil`.
+   - `_oob_payload` re-renders all visible groups per filter click.
+     Push filter changes through the SSE RESYNC path; respond 204
+     and let SSE deliver the heavy render.
+
+5. **Poster proxy `/poster/{src}/{id}`.** ~50 LOC async route in
    `web/routes.py`; pipes `httpx` -> `StreamingResponse`, strips API
    key. Only matters if this ever runs outside LAN.
 
-4. **Nix flake derivation (Phase 9.4).** Replace the
-   `writeShellApplication` shim in `flake.nix` with a proper Python
-   derivation. Then 9.3 / 9.5 / 9.6 fall into line.
+6. **Nix flake derivation (Phase 9.4).** Replace the
+   `writeShellApplication` shim with a proper Python derivation.
+   Then 9.3 / 9.5 / 9.6 fall in line.
 
-5. **README + CLAUDE.md final pass (Phase 9.2).**
+7. **README + CLAUDE.md final pass (Phase 9.2).**
 
-6. **Tests backfill.** No `tests/` yet. CLAUDE.md says
-   `python3 -m pytest tests/ -v` is required before commit; memory
-   `[[feedback_defer_tests]]` defers it to a dedicated pass. Highest
-   leverage: `arr/index.py:build_index` (pure), `arr/client.py`
-   (httpx-mock harness), the new `_rebuild_chunked` path.
+8. **Tests backfill (task #4).** No `tests/` yet. Highest leverage:
+   `scripts/test_event_loops.py` Playwright harness (formal version
+   of the ad-hoc smokes in `/tmp/qf_smoke*.py` from session 10),
+   `arr/index.py:build_index` (pure), `arr/client.py` (httpx-mock
+   harness), `qbit/sync.py:_backoff_seconds`, the chunked cold-boot
+   path. Memory `[[feedback_defer_tests]]` says tests are a dedicated
+   pass -- when that lands, lock in the session-10 regressions.
 
 ### Known caveats
 
@@ -82,15 +176,25 @@ list..." progress block.
 - **Title-fallback false matches.** `ARR_TITLE_FALLBACK=true`
   (default) catches more but can mis-match "Avatar" (2009) against
   an unrelated entry. Set to `false` for strict downloadId-only
-  matching; cost is pre-history torrents appear as orphans.
+  matching; cost is pre-history torrents appear as orphans. Session
+  10: `_claim` now logs a WARNING when title fallback re-claims an
+  entity already linked via tag/queue/history -- useful diagnostic.
 - **API key visible in browser** for posters. Acceptable on LAN; see
-  pickup priority 3.
-- **Two-poller fan-out.** qBit poller ticks ~1 s, arr poller ~60 s,
-  arr also re-indexes on qBit RESYNCs. SSE coalesces via
-  `last_resync_at` + `last_partial_at` so duplicate RESYNCs collapse.
+  pickup priority 5.
+- **Two-poller fan-out.** qBit poller ticks ~1 s, arr poller ~60 s.
+  Arr also re-indexes on qBit RESYNCs (NOT RESYNC_PARTIAL during
+  cold-boot -- session 10 suppresses those to avoid a thundering herd).
 - **`ArrStore` concurrent mutation.** Mitigated by atomic dict-
   reference swap on `hash_to_arr` (build new, assign whole). Other
-  fields (`movies_by_id`, etc.) follow the same pattern.
+  fields follow the same pattern.
+- **FilterState lost on every uvicorn `--reload`.** Subscriptions
+  live in process memory. Session-10 client-side replay
+  (`localStorage[qf_session_v1]`) self-heals once SSE reconnects, so
+  this is now a ~1 s flicker rather than a hard divergence -- but
+  there's still a window where the user's tab shows old chips and the
+  groups list rebuilds. Proper server-side persistence is deferred.
+- **Pre-existing mypy errors** at `arr/client.py:540,557`. Not
+  introduced this session, not blocking work. Future cleanup.
 
 ### Out-of-scope (deferred)
 
@@ -110,9 +214,9 @@ list..." progress block.
 
 - **Before commit:** `uv run ruff check src/qbit_filter` and `uv run
   mypy --strict src/qbit_filter`. Both pass on `master` as of
-  `13d289d`. Two pre-existing mypy errors in `arr/client.py:460,477`
-  (Item "None" of "Any | dict | None" has no attribute "get") --
-  not introduced by recent work.
+  `13d289d`; session 10 is uncommitted but also passes (ruff clean,
+  mypy back to the two pre-existing errors at `arr/client.py:540,557`
+  -- Item "None" of "Any | dict | None" has no attribute "get").
 - `python3 -m pytest tests/ -v` is the eventual gate; `tests/`
   doesn't exist yet (priority 6).
 - No emojis in any file (pre-commit hook enforces). Use `[OK]` /
@@ -198,16 +302,98 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim;
 | Phase 10: Rule-cleanup UX | Done | 8/8 |
 | Phase 11: Radarr / Sonarr integration | Done | 6/6 |
 | Phase 12: Cache removal + chunked cold-boot | Done | -- |
+| Session 10: Reliability + UX sweep | Done (uncommitted) | 12/12 |
 
 Phase 9 remaining: 9.2 (README + CLAUDE.md final pass), 9.3 (verify
 Python deps in nixpkgs), 9.4 (proper flake.nix derivation), 9.5 (Nix
 build verification), 9.6 (final acceptance check).
+
+Session 10 batch (closed this session): P0-1 snapshot store.torrents,
+P0-2 wait_for on blocking thread-calls, P0-3 long-lived httpx client,
+P0-5 suppress RESYNC_PARTIAL in arr listener, P0 cold-boot SSE-open
+synthetic RESYNC -> PARTIAL, qbit_consecutive_failures + backoff,
+lifespan drain SSE subs, arr bus listener hardening, P1-8 selection
+MO prune, P1-9 drop rAF in applyBatchStaging, P1-10 relocate rule
+activation marker, count_by_facet arr_rid cache key, arr title-
+fallback collision warning, keys.js Escape unification, /sse drop
+is_disconnected peek, UI layout-shift fix (per-card intrinsic-size +
+.no-cv + scrollbar-gutter), FilterState session-replay via
+data-qf-state, structured debug logging baseline (Python + JS).
 
 ## Decisions & Notes
 
 <!-- Append as: YYYY-MM-DD: [decision]. Keep entries that still affect
      current behaviour; let git log own the rest. -->
 
+- 2026-05-21 (session 10): `_rebuild_index_and_publish` snapshots
+  `tuple(store.torrents.values())` before calling `build_index`. The
+  reconciler yields on `to_thread(_warm_parse_cache)` and the chunked
+  cold-boot's `self.store.torrents.clear()` was free to fire between
+  the snapshot and the iteration in `build_index`, raising
+  `RuntimeError: dictionary changed size during iteration` on a
+  ~1-in-N race. The single-event-loop model wasn't enough -- explicit
+  snapshot is required at every yield point that exposes the dict.
+- 2026-05-21 (session 10): `_QbitListener.notify` ignores
+  `RESYNC_PARTIAL` until `store.cold_boot_done`. Cold-boot emits one
+  per 200-torrent chunk (every ~50-150 ms); reacting to each was a
+  thundering herd of `build_index` + SSE fan-outs. One terminal
+  RESYNC catches everything at the end of cold-boot.
+- 2026-05-21 (session 10): SSE-open synthetic RESYNC is now
+  `RESYNC_PARTIAL` when `not store.cold_boot_done`. A full RESYNC
+  there carried `data-final=1` and the canonical slug list of the
+  PARTIAL store, telling `applyBatchStaging` to prune any non-listed
+  cards -- the user saw "Loading 47%" + an apparently complete card
+  list.
+- 2026-05-21 (session 10): `httpx.AsyncClient` owned by
+  `_arr_poller` lifetime, not `fetch_once`. Per httpx docs, per-tick
+  client creation defeats the connection pool and pays TLS handshake
+  every cycle. Closed in `finally`.
+- 2026-05-21 (session 10): Blocking `to_thread` calls bounded by
+  `asyncio.wait_for`. `connect` -> 15 s, `sync_maindata` -> 30 s. The
+  thread can't be killed, but the coroutine no longer waits past the
+  timeout -- shutdown proceeds.
+- 2026-05-21 (session 10): `qbit/sync.py:poll()` takes an optional
+  `Store` and applies capped-exponential backoff
+  (`base * 2^min(N-1, 6)`, cap 60 s) when ticks fail. Reset on first
+  success. `_poller` logs healthy<->degraded transitions to the
+  activity log so the UI surfaces a stuck qBit.
+- 2026-05-21 (session 10): `applyBatchStaging` runs synchronously
+  inside `htmx:oobAfterSwap`, NOT in a `requestAnimationFrame`. htmx
+  outerHTML swap REPLACES `#qf-batch-staging`; the rAF closure was
+  holding the detached prior node, and successive batches could
+  orphan cards in unreachable detached subtrees.
+- 2026-05-21 (session 10): MutationObserver on `#groups` prunes the
+  selection Map on row removal -- BUT only when
+  `document.getElementById('torrent-' + h)` confirms the row is
+  truly gone. htmx innerHTML swap removes the old subtree and
+  inserts a new one in the same tick; the MO microtask fires AFTER
+  afterSwap, so without the live-DOM re-check the MO would delete
+  the hashes auto-selected by the rule chip 31 ms earlier.
+- 2026-05-21 (session 10): Per-card `contain-intrinsic-size` set in
+  `_group.html` as `max(140, 56 * torrents + 12)`. The universal
+  480 px placeholder caused 300+ px shifts as small single-torrent
+  cards came into view. Compare-strip cards (rule preview) opt out
+  of `content-visibility: auto` via `.no-cv` because factor-pill
+  wrapping makes their height unpredictable; the rule-active subset
+  is small enough that paint cost is negligible.
+- 2026-05-21 (session 10): `count_by_facet` cache key includes
+  `store.arr.rid` (or 0 when no arr store). Arr poller swaps in
+  `hash_to_arr` WITHOUT bumping `store.rid`, so memoised arr-facet
+  counts went stale until the next qBit poll mutation.
+- 2026-05-21 (session 10): `_active_filters.html` emits
+  `data-qf-state` JSON carrying the canonical FilterState. `keys.js`
+  reads it as the source of truth for the saved session (scraping
+  individual chip nodes missed `min_torrents` because that button
+  has class `.toggle-pill`, not `.facet-chip`). On SSE open, if the
+  saved state is non-empty and the current DOM shows empty server
+  state, the client replays via `htmx.ajax('POST', ...)` so OOB
+  swaps fire correctly and the chrome chips redraw.
+- 2026-05-21 (session 10): Debug logging baseline. Set
+  `LOG_LEVEL=debug` (Python) and `?qf_debug=1` or
+  `localStorage.qf_debug='1'` (JS) to enable. Both are off by default
+  to keep production console quiet. The JS namespace is `qfLog`
+  (`window.qfLog.debug/info/warn/error`); errors and warnings
+  always go through `console` regardless of the flag.
 - 2026-05-21 (session 9, `13d289d`): Cold-boot is chunked, not
   cached. qBit's `sync/maindata` is single-shot HTTP; "batching"
   happens post-fetch. First cold-boot calls `_rebuild_chunked`,

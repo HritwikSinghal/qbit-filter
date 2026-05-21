@@ -16,6 +16,7 @@ import qbittorrentapi
 
 from qbit_filter.config import Settings
 from qbit_filter.domain import MainDataDelta
+from qbit_filter.state.store import Store
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +77,26 @@ def normalise(
     )
 
 
+_BACKOFF_CAP_SECONDS = 60.0
+
+
+def _backoff_seconds(base: float, failures: int) -> float:
+    """Capped-exponential sleep: base * 2^min(failures-1, 6), capped at 60s.
+
+    Returns ``base`` when ``failures <= 0`` so the steady-state path uses
+    the normal poll cadence. The cap (60s) avoids a stuck qBit pinning the
+    coroutine for minutes; once back, the next success resets failures to
+    0 and we resume the configured interval immediately.
+    """
+    if failures <= 0:
+        return base
+    return float(min(_BACKOFF_CAP_SECONDS, base * (2 ** min(failures - 1, 6))))
+
+
 async def poll(
     client: qbittorrentapi.Client,
     settings: Settings,
+    store: Store | None = None,
 ) -> AsyncIterator[MainDataDelta]:
     """Indefinitely yield ``MainDataDelta``s every ``poll_interval_seconds``.
 
@@ -86,14 +104,31 @@ async def poll(
     A full-update tick rebuilds the local ``known`` hash set; incremental
     ticks fold ``added`` in and ``removed`` out so the next call's
     added-vs-changed partitioning stays correct.
+
+    Backoff: when ``store`` is supplied, transient failures (timeout +
+    library exceptions) increment ``store.qbit_consecutive_failures`` and
+    the sleep between ticks grows capped-exponentially. The next successful
+    tick zeroes the counter and the sleep snaps back to ``interval``. Pass
+    ``store=None`` from tests / one-off callers; backoff is then disabled.
     """
     rid = 0
     known: set[str] = set()
     interval = settings.poll_interval_seconds
 
+    # ``sync_maindata`` runs on a worker thread that ``asyncio.to_thread``
+    # cannot cancel; without a timeout, a hung qBit pins shutdown to the
+    # worker thread's lifetime. 30s is comfortably above a real poll cycle
+    # on a busy seedbox and short enough to flag a stuck server without
+    # also breaking the steady-state ~1s cadence.
     while True:
+        tick_ok = False
         try:
-            raw = dict(await asyncio.to_thread(client.sync_maindata, rid=rid))
+            raw = dict(
+                await asyncio.wait_for(
+                    asyncio.to_thread(client.sync_maindata, rid=rid),
+                    timeout=30.0,
+                )
+            )
             delta = normalise(raw, known_hashes=known)
             rid = delta.rid
 
@@ -103,8 +138,21 @@ async def poll(
                 known |= set(delta.added.keys())
                 known -= delta.removed
 
+            tick_ok = True
             yield delta
+        except TimeoutError:
+            logger.warning("sync/maindata timed out after 30s; retrying")
         except Exception as exc:
             logger.warning("sync/maindata poll failed: %s", exc)
 
-        await asyncio.sleep(interval)
+        if store is not None:
+            if tick_ok:
+                store.qbit_consecutive_failures = 0
+            else:
+                store.qbit_consecutive_failures += 1
+            sleep_for = _backoff_seconds(
+                interval, store.qbit_consecutive_failures
+            )
+        else:
+            sleep_for = interval
+        await asyncio.sleep(sleep_for)

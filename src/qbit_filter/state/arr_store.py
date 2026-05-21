@@ -10,9 +10,12 @@ Kept separate from :class:`qbit_filter.state.store.Store` because:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from qbit_filter.arr.models import ArrMatch, ArrMovie, ArrSeries, QualityProfile
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)

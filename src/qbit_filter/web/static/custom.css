@@ -13,6 +13,16 @@ html, body {
   font-size: var(--t-md);
   line-height: 1.45;
   min-height: 100vh;
+  /* Reserve the scrollbar gutter so the page doesn't shift horizontally
+     when content height crosses the viewport threshold (common during
+     cold-boot streaming and after rule-chip filtering). */
+  scrollbar-gutter: stable;
+  /* Explicit -- scroll anchoring is on by default, but make the intent
+     visible: when a group card above the viewport changes height (a
+     torrent added/removed) the browser keeps the user's scroll position
+     anchored to the nearest visible descendant rather than letting the
+     viewport drift up/down. */
+  overflow-anchor: auto;
 }
 
 a { color: inherit; text-decoration: none; }
@@ -724,7 +734,14 @@ button { font: inherit; cursor: pointer; }
 .rule-chip[aria-pressed='true'] .count,
 .rule-chip.is-active .count { color: var(--fg); }
 
-/* Group card -- new 1/4 + 3/4 layout (built in Phase D) */
+/* Group card -- new 1/4 + 3/4 layout (built in Phase D).
+
+   ``contain-intrinsic-size`` is set per-card via inline style from the
+   template (computed as max(140, 56 * torrent_count + 12)). Cards keep
+   ``content-visibility: auto`` so off-screen cards still skip rendering
+   work, but the placeholder height now matches actual content -- the
+   universal 480px we used before caused 300+px layout shifts as small
+   single-torrent cards came into view. */
 .group-card {
   display: grid;
   grid-template-columns: 1fr 3fr;
@@ -734,7 +751,20 @@ button { font: inherit; cursor: pointer; }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   content-visibility: auto;
-  contain-intrinsic-size: auto 480px;
+  /* Fallback for cards whose template didn't compute an explicit size --
+     ``auto`` lets the browser remember the measured size after first
+     paint either way. */
+  contain-intrinsic-size: auto 200px;
+}
+/* Compare-strip cards (rule preview with both keepers and flagged) opt out
+   of content-visibility: factor pills wrap to variable line counts, so the
+   server can't predict the height accurately. Cumulative shift while
+   scrolling through the rule-active subset was the user-reported "UI keeps
+   moving" feel. The active rule subset is small (tens of cards), so
+   painting them all unconditionally is cheap. */
+.group-card.no-cv {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
 }
 .group-card:hover { border-color: var(--border-strong); }
 

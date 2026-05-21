@@ -1,4 +1,20 @@
-<div class="active-filters-strip">
+{# Canonical filter state JSON, read by keys.js for session-replay
+   persistence. This is the single source of truth the client reads after
+   any filter mutation -- scraping individual chips misses the toggle-pill
+   (different class) and the min_torrents value. Embedding the server's
+   own view here keeps client + server in sync no matter how the chip DOM
+   evolves. #}
+{% set _qf_state_facets = [] %}
+{% for s in filter_state.statuses %}{% set _ = _qf_state_facets.append({'facet':'status','value':s|string}) %}{% endfor %}
+{% for c in filter_state.categories %}{% set _ = _qf_state_facets.append({'facet':'category','value':c}) %}{% endfor %}
+{% for t in filter_state.tags %}{% set _ = _qf_state_facets.append({'facet':'tag','value':t}) %}{% endfor %}
+{% for tr in filter_state.trackers %}{% set _ = _qf_state_facets.append({'facet':'tracker','value':tr}) %}{% endfor %}
+{% for s in filter_state.not_statuses %}{% set _ = _qf_state_facets.append({'facet':'not_status','value':s|string}) %}{% endfor %}
+{% for c in filter_state.not_categories %}{% set _ = _qf_state_facets.append({'facet':'not_category','value':c}) %}{% endfor %}
+{% for t in filter_state.not_tags %}{% set _ = _qf_state_facets.append({'facet':'not_tag','value':t}) %}{% endfor %}
+{% for tr in filter_state.not_trackers %}{% set _ = _qf_state_facets.append({'facet':'not_tracker','value':tr}) %}{% endfor %}
+<div class="active-filters-strip"
+     data-qf-state='{"filters": {{ _qf_state_facets | tojson }}, "search": {{ filter_state.search | tojson }}, "min_torrents": {{ filter_state.min_torrents | tojson }}, "arr_monitored": {{ filter_state.arr_monitored | tojson }}, "arr_cutoff": {{ filter_state.arr_cutoff | tojson }}}'>
   {# Top-level select-all checkbox -- toggles selection of every visible
      torrent row in #groups, skipping keepers when a rule preview is
      active. The label updates to "Clear selection" as soon as anything

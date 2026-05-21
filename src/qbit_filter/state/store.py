@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,8 @@ from qbit_filter.domain import Group, GroupKey, Torrent
 
 if TYPE_CHECKING:
     from qbit_filter.state.arr_store import ArrStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -54,6 +57,12 @@ class Store:
     qbit_poll_count: int = 0
     qbit_last_error: str = ""
     qbit_host: str = ""
+    # Rolling count of consecutive failed poll ticks. Reset to 0 on the next
+    # successful tick. Drives the capped-exponential backoff inside
+    # ``qbit/sync.py:poll()`` and the healthy<->degraded transition logged
+    # by ``app._poller``. Surfaced via the activity log; not yet rendered
+    # directly in the activity dialog.
+    qbit_consecutive_failures: int = 0
 
     def snapshot_groups(self) -> list[Group]:
         return list(self.groups.values())

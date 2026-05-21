@@ -31,7 +31,16 @@ class EventBus:
         return sub in self._subs
 
     def publish(self, event: DomainEvent) -> None:
-        for sub in list(self._subs):
+        subs = list(self._subs)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "bus.publish kind=%s subs=%d group=%s hash=%s",
+                event.kind.name,
+                len(subs),
+                event.group_key.slug() if event.group_key else "-",
+                (event.torrent_hash or "-")[:8],
+            )
+        for sub in subs:
             try:
                 sub.notify(event)
             except Exception:
