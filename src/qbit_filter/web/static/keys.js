@@ -407,6 +407,43 @@
     repaintSelectionFooter();
   });
 
+  /* The `selection` Map is the client-side source of truth. The server
+     renders torrent rows without any selection context (render_torrent has
+     no way to know what each client has selected), so every SSE row update
+     comes back with data-marked="false" and an unchecked checkbox. Without
+     this listener, any field change (progress/ratio/state) on a selected
+     torrent would visibly unselect it ~1s later when the reconciler ticks.
+
+     Restore selection state from the Map back onto the DOM for any
+     .torrent-row that just got OOB-swapped (single row or a whole #groups
+     re-render on RESYNC). Hashes not in `selection` are skipped, so user
+     deselections persist. */
+  function reapplySelectionTo(scope) {
+    if (!scope || !(scope instanceof Element)) return;
+    const rows = scope.classList.contains('torrent-row')
+      ? [scope]
+      : scope.querySelectorAll('.torrent-row');
+    let dirty = false;
+    rows.forEach((row) => {
+      const h = row.getAttribute('data-hash');
+      if (!h || !selection.has(h)) return;
+      const cb = row.querySelector('.row-check');
+      if (cb instanceof HTMLInputElement && !cb.checked) cb.checked = true;
+      if (row.getAttribute('data-marked') !== 'true') {
+        row.setAttribute('data-marked', 'true');
+      }
+      // Refresh stored size: a row's bytes can change as it downloads, and
+      // the footer total should track the latest server-reported value.
+      selection.set(h, rowBytes(row));
+      dirty = true;
+    });
+    if (dirty) repaintSelectionFooter();
+  }
+
+  document.body.addEventListener('htmx:oobAfterSwap', (e) => {
+    reapplySelectionTo(e.target);
+  });
+
   document.addEventListener('DOMContentLoaded', repaintSelectionFooter);
 
   /* =========================================================================
