@@ -10,6 +10,17 @@ earlier same-day commits also landed but weren't called out in this
 tracker -- captured below for completeness. ruff clean. mypy back to
 the two pre-existing `arr/client.py:540,557` errors.
 
+**Session 11 quick-fix (uncommitted):** the "arr live" chip was already
+wired for both Radarr and Sonarr in `ArrMatch.arr_current`, but
+`_fetch_current_download_ids` was capped at 4 pages * 250 records. For
+Radarr (one entity per movie) that covers any library; for Sonarr (one
+entity per *episode*) it only saw the most recent ~1000 imports.
+Playwright check via Firefox showed TV coverage at 59/633 rows (9.3%)
+vs movies at 435/506 (86%). Raised Sonarr's `pages` cap to 40 and added
+an early-stop when a full page yields zero new entity ids. Recheck:
+TV coverage now 537/633 (84.8%), on par with movies. ruff clean; mypy
+still the two pre-existing errors, no new ones.
+
 **Recent feature work also already committed (not previously
 tracked):**
 

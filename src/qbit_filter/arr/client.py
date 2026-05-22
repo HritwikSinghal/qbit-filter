@@ -395,6 +395,11 @@ async def _fetch_current_download_ids(
     we see for a given entity is the current import; we record its
     downloadId and ignore any earlier entries for the same entity.
 
+    Stops early once a full page contributes no new entity ids -- everything
+    beyond that point is older imports the user has since upgraded, so they
+    don't change the "live" set. ``pages`` is the hard upper bound (defensive
+    cap against a Sonarr lib with thousands of episodes paging forever).
+
     The returned set is the universe of hashes that arr still considers
     "live" on disk. Any hash *outside* the set is either older media arr
     has since upgraded or an unimported grab -- the cleanup engine reads
@@ -425,6 +430,7 @@ async def _fetch_current_download_ids(
             break
         if not records:
             break
+        before = len(first_seen)
         for item in records:
             if not isinstance(item, dict):
                 continue
@@ -437,12 +443,19 @@ async def _fetch_current_download_ids(
             download_id = str(item.get("downloadId") or "").strip().lower()
             if download_id:
                 out.add(download_id)
+        if len(first_seen) == before:
+            break
+        if len(records) < page_size:
+            break
     return frozenset(out)
 
 
 async def fetch_radarr_current_download_ids(
     client: httpx.AsyncClient, url: str, api_key: str
 ) -> frozenset[str]:
+    # Radarr has one entity per movie, so 4 * 250 = 1000 records covers
+    # essentially any library size -- the early-stop almost always kicks in
+    # on page 1 or 2.
     return await _fetch_current_download_ids(
         client, url, api_key, entity_field="movieId"
     )
@@ -451,8 +464,11 @@ async def fetch_radarr_current_download_ids(
 async def fetch_sonarr_current_download_ids(
     client: httpx.AsyncClient, url: str, api_key: str
 ) -> frozenset[str]:
+    # Sonarr has one entity per *episode*, so a 1000-episode library needs
+    # ~4 full pages just to cover every episode once. Cap higher and let the
+    # early-stop end the walk as soon as the page contributes nothing new.
     return await _fetch_current_download_ids(
-        client, url, api_key, entity_field="episodeId"
+        client, url, api_key, entity_field="episodeId", pages=40
     )
 
 
