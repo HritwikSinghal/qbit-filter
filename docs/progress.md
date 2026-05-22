@@ -1,18 +1,55 @@
 # Project: qbit-filter
-> Last updated: 2026-05-21 | Session: 10
+> Last updated: 2026-05-23 | Session: 11 (tracker refresh)
 
 ## Current state
 
-**Session 10 reliability + UX sweep (uncommitted)** -- focused
-architectural review followed by a batch of P0/P1 fixes. Nothing new
-on the feature roadmap; this session shored up the event-loop
-plumbing, killed a visible layout-shift class, and added a
-client-side replay so filter selections survive uvicorn `--reload`.
-22 files modified, +874 / -102 lines. ruff clean. mypy back to the
-two pre-existing `arr/client.py:540,557` errors -- not introduced
-this session.
+**Master is clean.** Session 10's reliability + UX sweep is shipped as
+the single bundled commit `b78fdb1 fix: harden event loop and stabilize
+UI layout` (not the 5-way split previously suggested below). Four
+earlier same-day commits also landed but weren't called out in this
+tracker -- captured below for completeness. ruff clean. mypy back to
+the two pre-existing `arr/client.py:540,557` errors.
 
-Headline fixes:
+**Recent feature work also already committed (not previously
+tracked):**
+
+- `025c607 fix: scope TV cleanup rules per season` -- superseded-quality
+  and duplicate-same-quality previously compared every torrent in a TV
+  group together, so an S01 2160p pack marked an S02 1080p release as
+  superseded. Rules now partition TV groups by `quick_season` (with a
+  full-series bucket) before keeper/loser logic. Movies unchanged.
+- `b4999cf fix: keep newest duplicate and match TV titles via guessit`
+  -- `DuplicateSameQualityRule` now keeps the **newest** copy at a tier
+  (arr only re-grabs on upgrade/repack); reason text + gap calc reframed
+  relative to the newer keeper. `arr/index.py` title fallback routed
+  through guessit so TV releases without a year token strip release
+  noise before lookup -- the old prefix-cut left
+  `S01.1080p.WEB-DL...` glued and never matched `series_by_norm`.
+- `bd671d5 feat: add header activity widget for service telemetry` --
+  cold-boot loading card replaced by a persistent header chip exposing
+  qBit + arr poller state (connect status, last poll, cycles,
+  queue/history/match counts) and a rolling 16-line log, pushed via OOB
+  swaps on every RESYNC. Distinguishes "not configured" from
+  "configured but unreachable" via per-service
+  attempted/fetched/error counters in `ArrSnapshot`/`ArrStore`. Stamps
+  `cold_boot_total` up-front so the streaming progress bar has a stable
+  denominator across PARTIAL resyncs. Threads per-season keepers as a
+  frozenset so multi-season TV groups show one keeper per season
+  instead of dropping S01/S02 when S03 has a keeper.
+- `ab72615 feat: prefer arr-current file as duplicate keeper` --
+  `arr/client.py` now fetches `downloadFolderImported` history per
+  movie/episode and unions the resulting hashes into `ArrSnapshot` so
+  every `ArrMatch` carries an `arr_current` flag sourced from the live
+  imported file. `DuplicateSameQualityRule` promotes the arr-current
+  torrent to keeper (falls back to newest when arr has no opinion);
+  reason text picks based on actual age gap. Green "arr live" chip
+  renders on plain rows and on both sides of the compare strip.
+  New-group delta inserts switched to `beforeend` so existing cards
+  stop jumping on insert; order restored on next RESYNC. uvicorn
+  `reload_includes` widened to html/css/js for dev-mode reloads.
+
+**Session 10 sweep headline fixes (committed `b78fdb1`):**
+
 - **No more dict-iter-while-mutate race in `_rebuild_index_and_publish`**
   (`app.py:189`): now snapshots `tuple(store.torrents.values())`
   before passing to `build_index`. The reconciler yields the loop on
@@ -99,18 +136,7 @@ list..." progress block.
 
 ### Pickup priorities (in order)
 
-1. **Commit session 10's bug-fix sweep.** 22 files dirty, no commits
-   yet. `git diff --stat` shows the scope. Suggested split:
-   - `fix(event-loop): harden qBit/arr pollers and SSE lifecycle`
-     (P0-1..P0-3, P0-5, lifespan drain, listener wrapping, backoff)
-   - `fix(ui): kill layout shift on data fetch` (per-card
-     intrinsic-size + .no-cv + scrollbar-gutter)
-   - `fix(ui): MO race + rAF cold-boot bug + Escape unify + session
-     replay` (keys.js cluster)
-   - `chore(logging): structured debug logs across hot paths`
-   - `docs: session 10 handoff`
-
-2. **Live-verify reliability changes against the real qBit instance.**
+1. **Live-verify reliability changes against the real qBit instance.**
    The Playwright smokes hit a live ~1310-torrent catalogue and went
    green, but the cold-boot RESYNC suppression and httpx-pool reuse
    want eyes on a fresh boot:
@@ -124,43 +150,51 @@ list..." progress block.
      climbs, sleep grows (visible in debug log), "qBittorrent
      recovered after N failed poll(s)" appears on reconnect.
 
-3. **Phase 11 follow-ups** (independently landable, same as session 9):
+2. **Phase 11 follow-ups** (independently landable, same as session 9):
    - **Identity-based regrouping** -- merge qBit groups sharing a
      TMDB/TVDB id. Post-pass in `state/views.py` after `apply_filters`.
    - **Sonarr-aware season grid** -- replace `[S01][S02]` chips with
      `[S01 OK 10/10][S03 X 7/10]`. Needs `_season_grid.html` partial.
+     Per-season keepers are already threaded through render
+     (`bd671d5`), so the data hook is ready.
    - **Below-cutoff anti-rule** -- warn factor (yellow) when
      `SupersededQualityRule` would mark a 1080p but arr is searching
      for an upgrade. Not a separate rule chip.
    - **Open in Radarr/Sonarr deep-link** -- kebab menu item using
      `arr_meta.title_slug` + `radarr_url` / `sonarr_url`.
 
-4. **Structural refactors flagged by session-10 arch review (P1):**
-   - `web/routes.py` is 1600 lines, 7 distinct responsibilities.
-     Extract activity widget, SSE protocol, rule preview helpers
-     into separate modules. Adding new cleanup rules will be painful
-     until this lands.
-   - `state/store.py` `Store` mixes canonical state, telemetry,
-     memoisation. Split into `Store` (canonical), `Telemetry`
-     (poller-owned), `FacetCache` (views-owned).
-   - `cleanup/rules.py` is 797 lines, one-file-many-rules. Move each
-     rule to `cleanup/rules/<slug>.py`, shared scoring helpers to
-     `cleanup/scoring.py`. Registry auto-imports via `pkgutil`.
+3. **Structural refactors flagged by session-10 arch review (P1):**
+   - `web/routes.py` is 1637 lines (grew from 1600 after `bd671d5` added
+     activity-widget plumbing), 7+ distinct responsibilities. Extract
+     activity widget, SSE protocol, rule preview helpers into separate
+     modules. Adding new cleanup rules will be painful until this lands.
+   - `state/store.py` `Store` is small (74 lines) but already carries
+     three kinds of fields: canonical (torrents/groups/rid),
+     memoisation (`facet_cache`), telemetry (`qbit_connected`,
+     `qbit_last_*`, `qbit_consecutive_failures`, `cold_boot_*`). Not
+     urgent at current size, but call out the boundary: telemetry
+     should move to a `Telemetry` dataclass owned by the poller before
+     it grows further.
+   - `cleanup/rules.py` is 800 lines (grew with per-season + arr-current
+     changes), one-file-many-rules. Move each rule to
+     `cleanup/rules/<slug>.py`, shared scoring helpers to
+     `cleanup/scoring.py`. Registry auto-imports via `pkgutil`. This is
+     the surface the End Goal calls out as the plugin extension point.
    - `_oob_payload` re-renders all visible groups per filter click.
      Push filter changes through the SSE RESYNC path; respond 204
      and let SSE deliver the heavy render.
 
-5. **Poster proxy `/poster/{src}/{id}`.** ~50 LOC async route in
+4. **Poster proxy `/poster/{src}/{id}`.** ~50 LOC async route in
    `web/routes.py`; pipes `httpx` -> `StreamingResponse`, strips API
    key. Only matters if this ever runs outside LAN.
 
-6. **Nix flake derivation (Phase 9.4).** Replace the
+5. **Nix flake derivation (Phase 9.4).** Replace the
    `writeShellApplication` shim with a proper Python derivation.
    Then 9.3 / 9.5 / 9.6 fall in line.
 
-7. **README + CLAUDE.md final pass (Phase 9.2).**
+6. **README + CLAUDE.md final pass (Phase 9.2).**
 
-8. **Tests backfill (task #4).** No `tests/` yet. Highest leverage:
+7. **Tests backfill (task #4).** No `tests/` yet. Highest leverage:
    `scripts/test_event_loops.py` Playwright harness (formal version
    of the ad-hoc smokes in `/tmp/qf_smoke*.py` from session 10),
    `arr/index.py:build_index` (pure), `arr/client.py` (httpx-mock
@@ -213,12 +247,13 @@ list..." progress block.
 ### Conventions
 
 - **Before commit:** `uv run ruff check src/qbit_filter` and `uv run
-  mypy --strict src/qbit_filter`. Both pass on `master` as of
-  `13d289d`; session 10 is uncommitted but also passes (ruff clean,
-  mypy back to the two pre-existing errors at `arr/client.py:540,557`
-  -- Item "None" of "Any | dict | None" has no attribute "get").
+  mypy --strict src/qbit_filter`. ruff is clean on master; mypy has
+  two pre-existing errors at `arr/client.py:540,557` (Item "None" of
+  "Any | dict | None" has no attribute "get") -- don't introduce new
+  ones.
 - `python3 -m pytest tests/ -v` is the eventual gate; `tests/`
-  doesn't exist yet (priority 6).
+  doesn't exist yet (priority 7). Tests are a dedicated backfill
+  pass -- do not try to run pytest as a per-change gate today.
 - No emojis in any file (pre-commit hook enforces). Use `[OK]` /
   `[X]` / arrow `->` instead.
 
@@ -283,7 +318,8 @@ src/qbit_filter/
                            _filters.html  _active_filters.html
                            _group.html  _torrent.html  _empty.html
                            _rule_bar.html  _selection_bar.html
-                           _compare_strip.html
+                           _compare_strip.html  _confirm_delete.html
+                           _arr_history_dialog.html  _kbd_cheatsheet.html
                static/     tokens.css  custom.css  favicon.svg
                            keys.js  livereload.js
 scripts/       capture_fixtures.py  screenshot.py
@@ -302,7 +338,8 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim;
 | Phase 10: Rule-cleanup UX | Done | 8/8 |
 | Phase 11: Radarr / Sonarr integration | Done | 6/6 |
 | Phase 12: Cache removal + chunked cold-boot | Done | -- |
-| Session 10: Reliability + UX sweep | Done (uncommitted) | 12/12 |
+| Session 10: Reliability + UX sweep | Done (`b78fdb1`) | 12/12 |
+| Session 10 features: per-season TV scoping, keep-newest dup, header activity widget, arr-current keeper | Done (`025c607`, `b4999cf`, `bd671d5`, `ab72615`) | 4/4 |
 
 Phase 9 remaining: 9.2 (README + CLAUDE.md final pass), 9.3 (verify
 Python deps in nixpkgs), 9.4 (proper flake.nix derivation), 9.5 (Nix

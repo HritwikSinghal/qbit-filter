@@ -60,13 +60,29 @@ Design implications:
 
 - `qbit/` is the only place that imports `qbittorrent-api`. `client.py` carries
   the IP-auth-bypass workaround (`LoginFailed` -> `app_version()`).
-- `state/store.py` is mutated only by `state/reconciler.py`. Everyone else reads.
+- `arr/` is the only place that imports `httpx`. Wraps Radarr / Sonarr
+  `/api/v3`; `index.py:build_index` is pure (snapshot + torrents ->
+  `dict[hash -> ArrMatch]`). Optional -- disabled when both arr URLs are blank.
+- `state/store.py` (canonical qBit state) is mutated only by
+  `state/reconciler.py`. Everyone else reads. `state/arr_store.py` is the
+  parallel arr-enrichment store, mutated only by the `_arr_poller` task in
+  `app.py`. `Store.arr` is a one-way pointer.
 - `state/views.py` is pure: snapshot in, filtered groups out.
+- `cleanup/` is the rule plugin surface. `registry.py` registers rule classes;
+  `rules.py` is the current library (one-file-many-rules; splitting into
+  `cleanup/rules/<slug>.py` is on the P1 refactor list). Stub rules raise
+  `NotImplementedError` and the registry surfaces them as greyed-out in the
+  rule bar.
 - Each SSE client owns a `Subscription` with its own `FilterState`. Filter
-  changes update **that subscription's** state, not the store.
+  changes update **that subscription's** state, not the store. FilterState is
+  echoed to the client as `data-qf-state` JSON and replayed from `localStorage`
+  on SSE reconnect so selections survive `uvicorn --reload`.
 - Action endpoints (`/torrents/{hash}/{action}`) call `qbit/actions.py` and
   return 204. The reconciler picks up the change on next poll and SSE updates
   the UI naturally - no double-write.
+- The header activity widget reads telemetry fields off `Store`
+  (`qbit_connected`, `qbit_last_poll_at`, `qbit_consecutive_failures`, ...)
+  and the per-service counters on `ArrSnapshot`/`ArrStore`.
 
 ## qBit instance
 
@@ -76,9 +92,16 @@ try/except in `qbit/client.py` - it exists for a real reason.
 
 ## Conventions
 
-- Always run `python3 -m pytest tests/ -v` before considering a change done.
-- `ruff check` + `mypy --strict` must pass.
-- New features land with tests; bugfix commits include a regression test.
+- `uv run ruff check src/qbit_filter` and `uv run mypy --strict
+  src/qbit_filter` must pass before a change is done. ruff is clean on master;
+  mypy has two pre-existing `arr/client.py:540,557` errors -- don't introduce
+  new ones.
+- No `tests/` directory yet -- tests are a dedicated backfill pass, not a
+  per-change gate. When a test suite lands (`docs/progress.md` priority 7),
+  this convention upgrades to "run pytest before done". Until then, don't
+  invent `python3 -m pytest tests/ -v` invocations that will fail.
+- Suggest a regression test when fixing a bug (helps the future backfill);
+  don't block the fix on writing one.
 - No emojis in any file (pre-commit hook enforces this).
 
 ## Long-Running Project

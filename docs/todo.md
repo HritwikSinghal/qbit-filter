@@ -1,11 +1,16 @@
 # Todo
 
-> Going forward, structured tracking lives in **`/tasks.md`** (project root)
-> and **`docs/progress.md`**. This file stays as a free-form running list
-> of ideas / wishes -- tick items here when they land, then move the
-> structured follow-up into `tasks.md`.
+> Structured tracking lives in **`docs/progress.md`** (status, recent
+> commits, pickup priorities, decisions). This file stays as a free-form
+> running list of ideas / wishes -- tick items here when they land.
 
-## Goal
+## Goal (historical, now shipped)
+
+This section captures the origin question for the project. The
+upgrade-detection ask below shipped as `SupersededQualityRule` +
+`DuplicateSameQualityRule` (see `cleanup/rules.py`); leaving the
+description here for context.
+
 
 - we originally had 1080p versions downloaded for many shows/movies, but later on upgraded them to 2160p (which should have date added after 1080p version). so we need to remove all torrents which are upgraded.
   - can select torrents based on custom filter .one such filter is below
@@ -19,6 +24,42 @@
 
 ## Done
 
+- [x] **Header activity widget (`bd671d5`).** Persistent header chip
+      exposes qBit + arr poller state (connect status, last poll,
+      cycles, queue / history / match counts) + rolling 16-line log,
+      OOB-swapped on every RESYNC. Distinguishes "not configured" from
+      "configured but unreachable" via per-service counters.
+      `cold_boot_total` stamped up-front so the streaming progress bar
+      has a stable denominator. Per-season keepers threaded through
+      render as a frozenset (data hook for the Sonarr-aware season
+      grid below).
+- [x] **Arr-current file as duplicate keeper (`ab72615`).**
+      `arr/client.py` fetches `downloadFolderImported` history per
+      movie/episode; resulting hashes union into `ArrSnapshot`, every
+      `ArrMatch` carries an `arr_current` flag. `DuplicateSameQualityRule`
+      promotes the arr-current torrent to keeper (falls back to newest
+      when arr has no opinion). Green "arr live" chip renders on plain
+      rows and on both sides of the compare strip.
+- [x] **Keep-newest duplicate + guessit TV title fallback (`b4999cf`).**
+      `DuplicateSameQualityRule` now keeps the **newest** copy at a
+      tier (arr re-grabs only on upgrade/repack). `arr/index.py` title
+      fallback routes through guessit so TV releases without a year
+      token strip release noise before lookup -- old prefix-cut left
+      `S01.1080p.WEB-DL...` glued and missed `series_by_norm`.
+- [x] **Per-season TV cleanup-rule scoping (`025c607`).**
+      `SupersededQualityRule` + `DuplicateSameQualityRule` partition TV
+      groups by `quick_season` (with a full-series bucket) before
+      keeper/loser logic. Fixes the bug where an S01 2160p pack marked
+      an S02 1080p release as superseded. Movies unchanged.
+- [x] **Session 10 reliability + UX sweep (`b78fdb1`).** Event-loop
+      hardening (dict-iter-snapshot, asyncio.wait_for on blocking
+      `to_thread`, long-lived `httpx.AsyncClient`, qBit poll backoff,
+      lifespan SSE drain), cold-boot RESYNC_PARTIAL suppression in the
+      arr listener, layout-shift fix (per-card `contain-intrinsic-size`,
+      `.no-cv` opt-out, `scrollbar-gutter: stable`), keys.js cluster
+      (MO race fix, drop rAF batch-staging, Escape chain unified,
+      FilterState session replay), structured debug logging baseline
+      (Python `LOG_LEVEL=debug` + JS `qfLog` namespace).
 - [x] **Radarr / Sonarr integration (Phase 11).** New `arr/` package
       (client + sync + index + models), `state/arr_store.py`, \*arr
       polling task in `app.py` lifespan. Match precedence: tag -> queue
@@ -85,7 +126,10 @@
       One 2021" + "Dune 2021" -> one group.
 - [ ] **Sonarr-aware season grid (Phase 11.8).** Replace flat season
       chips with `[S01 OK 10/10][S02 OK 10/10][S03 X 7/10]` from
-      `series.seasons[].statistics`.
+      `series.seasons[].statistics`. Per-season keepers are already
+      threaded through render as a frozenset (shipped in `bd671d5`), so
+      the data hook is in place; remaining work is the `_season_grid.html`
+      partial.
 - [ ] **Confirm-dialog enrichment (Phase 11.9).** "Deleting 5 GB
       across 12 monitored Sonarr episodes. Sonarr will re-search if you
       proceed." Concrete consequence text from arr_match data.
