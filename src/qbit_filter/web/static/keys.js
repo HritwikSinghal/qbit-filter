@@ -409,6 +409,21 @@
     }
   }
 
+  /* Track mousedown coordinates so the row-body click handler below can
+     tell a real "click to toggle" apart from a drag-to-select-text
+     gesture. Without this, click-to-toggle would fight users who want
+     to copy a torrent name, size, factor pill, etc. -- their selection
+     would either get cancelled, or land them with an accidental row
+     toggle. */
+  let _mdX = 0, _mdY = 0;
+  document.body.addEventListener('mousedown', (e) => {
+    /* Only the primary button is interesting -- middle/right click
+       opens browser menus or auto-scroll and should never toggle. */
+    if (e.button !== 0) return;
+    _mdX = e.clientX;
+    _mdY = e.clientY;
+  });
+
   /* Event delegation works for SSE-injected rows too. */
   document.body.addEventListener('change', (e) => {
     const t = e.target;
@@ -874,9 +889,18 @@
       return;
     }
 
-    /* 6. Row body: shift-click range, ctrl/cmd-click toggle, plain click
-       just focuses. Skip clicks on interactive descendants (buttons,
-       links, checkbox -- handled above, anchors). */
+    /* 6. Row body: shift-click range, plain click toggles selection +
+       focuses. Skip clicks on interactive descendants (buttons, links,
+       checkbox -- handled above, anchors) so they keep their own
+       semantics (open modal, follow href, native check toggle).
+
+       Text selection guard: if the user dragged the mouse to highlight
+       text (size, factor pill, torrent name), don't fire a toggle. We
+       compare mousedown vs click coords for drag distance and inspect
+       window.getSelection() at click time -- a fresh non-empty selection
+       means the click was the end of a text-select gesture and should
+       leave the row alone. The selection itself stays intact so the
+       user can copy. */
     if (t.closest('button, a, input')) return;
     const row = t.closest('.torrent-row');
     if (!row) return;
@@ -886,12 +910,24 @@
       setFocusedRow(row);
       return;
     }
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      toggleRowSelection(row);
+    const dx = Math.abs(e.clientX - _mdX);
+    const dy = Math.abs(e.clientY - _mdY);
+    const dragged = dx > 4 || dy > 4;
+    const sel = window.getSelection && window.getSelection();
+    const hasSelection = !!(sel && !sel.isCollapsed && sel.toString().length > 0);
+    /* Suppress the toggle when:
+         - the user dragged (probably a text-select gesture even if the
+           selection ended up empty, e.g. they dragged then released over
+           non-text), OR
+         - a non-empty selection exists right now AND the row contains it
+           (so a click that just cleared a prior selection elsewhere
+           still toggles). */
+    const selWithinRow = hasSelection && sel.anchorNode && row.contains(sel.anchorNode);
+    if (dragged || selWithinRow) {
       setFocusedRow(row);
       return;
     }
+    toggleRowSelection(row);
     setFocusedRow(row);
   });
 

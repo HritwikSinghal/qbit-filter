@@ -94,7 +94,7 @@ try/except in `qbit/client.py` - it exists for a real reason.
 
 - `uv run ruff check src/qbit_filter` and `uv run mypy --strict
   src/qbit_filter` must pass before a change is done. ruff is clean on master;
-  mypy has two pre-existing `arr/client.py:540,557` errors -- don't introduce
+  mypy has two pre-existing `arr/client.py:556,573` errors -- don't introduce
   new ones.
 - No `tests/` directory yet -- tests are a dedicated backfill pass, not a
   per-change gate. When a test suite lands (`docs/progress.md` priority 7),

@@ -24,6 +24,27 @@ description here for context.
 
 ## Done
 
+- [x] **Responsive layout + row-click toggle (session 12,
+      uncommitted).** Layout was rendering at a fixed ~2734 px wide
+      regardless of viewport because a `white-space: nowrap` torrent
+      name's min-content expanded the row's bare-`1fr` grid track,
+      cascading up through `.group-card` and `.shell`. Changed every
+      affected `1fr` to `minmax(0, 1fr)` (`.shell`, `.group-card`,
+      `.torrent-row`, `.compare-strip`, plus their mobile breakpoints).
+      Plain click on a torrent row now toggles selection (was: focus-
+      only); drag-to-select and an active text selection both suppress
+      the toggle so name / meta / factor pills remain copyable.
+      `.torrent-row { cursor: pointer; }` for affordance, explicit
+      `user-select: text` on copyable text spans.
+- [x] **Sonarr arr-live coverage fix (`3c31de9`).** The "arr live"
+      chip + arr-current keeper logic was already wired for both
+      Radarr and Sonarr in `ArrMatch.arr_current`, but
+      `_fetch_current_download_ids` paged Sonarr's history grouped by
+      `episodeId` at the same 4-page (1000-record) cap as Radarr's
+      per-movie walk. A ~thousand-episode library only got the most
+      recent ~1000 imports flagged -- 9.3% of TV rows vs 86% of movie
+      rows. Raised Sonarr's `pages` cap to 40 and added an early-stop
+      (full page contributes no new entity ids). TV coverage now 84.8%.
 - [x] **Header activity widget (`bd671d5`).** Persistent header chip
       exposes qBit + arr poller state (connect status, last poll,
       cycles, queue / history / match counts) + rolling 16-line log,

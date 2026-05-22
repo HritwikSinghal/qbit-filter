@@ -1,25 +1,56 @@
 # Project: qbit-filter
-> Last updated: 2026-05-23 | Session: 11 (tracker refresh)
+> Last updated: 2026-05-23 | Session: 12 (Responsive layout + row-click toggle)
 
 ## Current state
 
-**Master is clean.** Session 10's reliability + UX sweep is shipped as
-the single bundled commit `b78fdb1 fix: harden event loop and stabilize
-UI layout` (not the 5-way split previously suggested below). Four
-earlier same-day commits also landed but weren't called out in this
-tracker -- captured below for completeness. ruff clean. mypy back to
-the two pre-existing `arr/client.py:540,557` errors.
+**Session 12 (uncommitted, working tree dirty):** two small UI fixes
+sitting in `src/qbit_filter/web/static/{custom.css,keys.js}`. No
+commit yet -- user hasn't asked. ruff / mypy unchanged (CSS + JS only).
 
-**Session 11 quick-fix (uncommitted):** the "arr live" chip was already
-wired for both Radarr and Sonarr in `ArrMatch.arr_current`, but
+1. **Responsive layout fix.** The page was rendering at a fixed
+   `mainW = 2734 px` regardless of viewport (1920 / 1440 / 1024 / 720
+   all showed the same horizontal scrollbar). Root cause: `.torrent-row
+   .name` carries `white-space: nowrap; text-overflow: ellipsis`, but
+   the row's grid was `display: grid; grid-template-columns: 28px 88px
+   1fr auto auto`. Bare `1fr` is `minmax(auto, 1fr)`, so the unbreakable
+   name's min-content (1516 px for the worst-case row) expanded the
+   `1fr` track past the card's intended width; that pushed `.group-card`
+   wider, which pushed `.shell`'s second column wider, which expanded
+   the viewport. Cascade: `1fr` -> `minmax(0, 1fr)` on `.shell` (desktop
+   + mobile breakpoint), `.group-card` (desktop + mobile),
+   `.torrent-row` (name column), `.compare-strip` (mobile). Verified
+   in Firefox via playwright -- `scrollW == vw` at 1920/1440/1024/720;
+   `.name` now ellipsises as designed.
+
+2. **Plain row click toggles selection.** Previously a plain click on
+   a row body only set focus; toggling required ctrl/cmd-click or the
+   row checkbox. Per user request, the entire row is now a click target
+   for both flat rows and rows inside the compare strip. Text-selection
+   guard: at `mousedown` we capture cursor coords; at `click` we
+   suppress the toggle when the user dragged (>4 px) OR when
+   `window.getSelection()` contains text whose anchor is inside the
+   row. This preserves copy-text behaviour on the torrent name, size,
+   factor pills, and arr chips. `.torrent-row { cursor: pointer; }` for
+   affordance; explicit `user-select: text` on `.name`, `.meta`,
+   `.reason-factors`, `.factor` (and their compare-strip equivalents)
+   guards against a future `user-select: none` higher up the tree.
+
+**Master is clean otherwise** -- session 10 sweep + session 11 fix
+remain the most recent shipped work. Sessions 11 quick-fix and
+session 10 sweep details retained below for context. ruff clean;
+mypy has the two pre-existing `arr/client.py:556,573` errors -- not
+introduced this session (CSS + JS only).
+
+**Session 11 quick-fix (`3c31de9 fix: extend Sonarr history walk for
+arr-live chip`):** the "arr live" chip was already wired for both
+Radarr and Sonarr in `ArrMatch.arr_current`, but
 `_fetch_current_download_ids` was capped at 4 pages * 250 records. For
 Radarr (one entity per movie) that covers any library; for Sonarr (one
 entity per *episode*) it only saw the most recent ~1000 imports.
 Playwright check via Firefox showed TV coverage at 59/633 rows (9.3%)
 vs movies at 435/506 (86%). Raised Sonarr's `pages` cap to 40 and added
 an early-stop when a full page yields zero new entity ids. Recheck:
-TV coverage now 537/633 (84.8%), on par with movies. ruff clean; mypy
-still the two pre-existing errors, no new ones.
+TV coverage now 537/633 (84.8%), on par with movies.
 
 **Recent feature work also already committed (not previously
 tracked):**
@@ -147,6 +178,17 @@ list..." progress block.
 
 ### Pickup priorities (in order)
 
+0. **Commit session 12.** Two-file working-tree change
+   (`web/static/custom.css`, `web/static/keys.js`). Suggested single
+   commit (the two fixes were reported together and share the
+   "selection / row UX" theme):
+       fix: make layout responsive and rows click-to-toggle
+
+   - `minmax(0, 1fr)` everywhere `1fr` previously sat on a grid track
+     that could host an unbreakable child.
+   - plain row click toggles selection with a drag/selection guard so
+     text inside `.name` / `.meta` / `.factor` remains copyable.
+
 1. **Live-verify reliability changes against the real qBit instance.**
    The Playwright smokes hit a live ~1310-torrent catalogue and went
    green, but the cold-boot RESYNC suppression and httpx-pool reuse
@@ -238,8 +280,9 @@ list..." progress block.
   this is now a ~1 s flicker rather than a hard divergence -- but
   there's still a window where the user's tab shows old chips and the
   groups list rebuilds. Proper server-side persistence is deferred.
-- **Pre-existing mypy errors** at `arr/client.py:540,557`. Not
-  introduced this session, not blocking work. Future cleanup.
+- **Pre-existing mypy errors** at `arr/client.py:556,573`. Not
+  introduced by current session-11 work (the Sonarr-coverage edit
+  shifted them down from 540,557). Future cleanup.
 
 ### Out-of-scope (deferred)
 
@@ -259,7 +302,7 @@ list..." progress block.
 
 - **Before commit:** `uv run ruff check src/qbit_filter` and `uv run
   mypy --strict src/qbit_filter`. ruff is clean on master; mypy has
-  two pre-existing errors at `arr/client.py:540,557` (Item "None" of
+  two pre-existing errors at `arr/client.py:556,573` (Item "None" of
   "Any | dict | None" has no attribute "get") -- don't introduce new
   ones.
 - `python3 -m pytest tests/ -v` is the eventual gate; `tests/`
@@ -351,6 +394,8 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim;
 | Phase 12: Cache removal + chunked cold-boot | Done | -- |
 | Session 10: Reliability + UX sweep | Done (`b78fdb1`) | 12/12 |
 | Session 10 features: per-season TV scoping, keep-newest dup, header activity widget, arr-current keeper | Done (`025c607`, `b4999cf`, `bd671d5`, `ab72615`) | 4/4 |
+| Session 11: Sonarr arr-live coverage fix | Done (`3c31de9`) | 1/1 |
+| Session 12: Responsive layout + row-click toggle | Working tree (uncommitted) | 2/2 |
 
 Phase 9 remaining: 9.2 (README + CLAUDE.md final pass), 9.3 (verify
 Python deps in nixpkgs), 9.4 (proper flake.nix derivation), 9.5 (Nix
@@ -373,6 +418,37 @@ data-qf-state, structured debug logging baseline (Python + JS).
 <!-- Append as: YYYY-MM-DD: [decision]. Keep entries that still affect
      current behaviour; let git log own the rest. -->
 
+- 2026-05-23 (session 12): Every grid track that hosts user-driven
+  content must use `minmax(0, 1fr)`, not bare `1fr`. CSS resolves bare
+  `1fr` to `minmax(auto, 1fr)`, which lets the track's min-content
+  (e.g. a `white-space: nowrap` torrent name) expand the track past
+  the available space and cascade upward through nested grids. The
+  payoff for getting this right is `text-overflow: ellipsis` actually
+  truncating, and the viewport not turning into a horizontal
+  scrollbar. Touched grids: `.shell`, `.group-card`, `.torrent-row`,
+  `.compare-strip`.
+- 2026-05-23 (session 12): Click-to-toggle on torrent rows uses a
+  mousedown-pos + window.getSelection() guard, not a brittle
+  user-select: none escape hatch. Mousedown records `_mdX/_mdY`; click
+  computes drag distance and inspects `getSelection()` for a non-empty
+  range whose `anchorNode` is inside the row. Either signal suppresses
+  the toggle, so click-to-toggle and drag-to-copy coexist without
+  fighting each other. Rule keepers in the compare strip are togglable
+  on plain click (consistent with the existing `x` keyboard shortcut,
+  which also doesn't skip keepers); only auto-select paths
+  (master-select, "select losers", invert, range) honour `data-keeper`.
+
+- 2026-05-23 (session 11): `_fetch_current_download_ids` walks pages
+  with an early-stop once a full page contributes zero new entity ids
+  (descending-by-date means anything beyond is older imports already
+  superseded by what we've recorded). Sonarr defaults to `pages=40`
+  vs Radarr's `4` because Sonarr's entity is the *episode* -- a
+  thousand-episode library blows past 4 * 250 records before the
+  per-entity de-dup converges, leaving most TV rows without the "arr
+  live" chip. Empirically TV coverage went 9.3% -> 84.8% on the live
+  ~1310-torrent / 148-TV-group instance. The `len(records) <
+  page_size` short-circuit catches the "fewer than a full page came
+  back" case too.
 - 2026-05-21 (session 10): `_rebuild_index_and_publish` snapshots
   `tuple(store.torrents.values())` before calling `build_index`. The
   reconciler yields on `to_thread(_warm_parse_cache)` and the chunked

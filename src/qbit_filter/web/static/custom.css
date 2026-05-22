@@ -373,10 +373,16 @@ button { font: inherit; cursor: pointer; }
   }
 }
 
-/* Layout shell */
+/* Layout shell.
+   ``minmax(0, 1fr)`` (instead of bare ``1fr``) keeps the main column from
+   being expanded by an unbreakable descendant (e.g. a long, nowrap
+   torrent name). Without the explicit 0 min, ``1fr`` resolves to
+   ``minmax(auto, 1fr)`` and any min-content wider than the viewport
+   pushes the grid past the right edge, turning the whole layout into a
+   fixed-width horizontally-scrolling page. */
 .shell {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   min-height: calc(100vh - var(--appbar-h));
 }
 
@@ -744,7 +750,7 @@ button { font: inherit; cursor: pointer; }
    single-torrent cards came into view. */
 .group-card {
   display: grid;
-  grid-template-columns: 1fr 3fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
   gap: 0;
   margin-bottom: 8px;
   background: var(--surface);
@@ -817,10 +823,13 @@ button { font: inherit; cursor: pointer; }
   flex-direction: column;
 }
 
-/* Torrent row */
+/* Torrent row.
+   ``minmax(0, 1fr)`` on the name column so ``white-space: nowrap`` +
+   ``text-overflow: ellipsis`` on .name actually truncate instead of
+   pushing the track wider than the card. */
 .torrent-row {
   display: grid;
-  grid-template-columns: 28px 88px 1fr auto auto;
+  grid-template-columns: 28px 88px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   height: var(--row-h);
@@ -830,6 +839,27 @@ button { font: inherit; cursor: pointer; }
   font-family: var(--font-mono);
   font-size: var(--t-sm);
   transition: background-color var(--motion-fast) var(--ease-standard);
+  /* The row body itself is a click target (toggles selection). Inline
+     buttons / inputs / links inside the row still get their own cursor
+     because they sit higher in the cascade. Text inside .name / .meta /
+     .factor remains user-selectable -- the click handler watches for
+     drag-to-select and skips the toggle when the user is highlighting
+     text (see ``Text selection guard`` in keys.js). */
+  cursor: pointer;
+}
+.torrent-row .name,
+.torrent-row .meta,
+.torrent-row .reason-factors,
+.torrent-row .factor,
+.compare-row-head .name,
+.compare-row-meta .meta,
+.compare-row-meta .reason-factors,
+.compare-row-meta .factor {
+  /* Reaffirm the default so a future "user-select: none" added higher
+     up the tree (e.g. for a drag interaction) doesn't accidentally
+     block copying the torrent name or factor values. */
+  user-select: text;
+  -webkit-user-select: text;
 }
 .torrent-row:last-child {
   border-bottom: none;
@@ -1015,7 +1045,7 @@ button { font: inherit; cursor: pointer; }
      name still has room to breathe instead of being squeezed under the
      badge. The original 1023px breakpoint sat too low and tore the
      layout in the most common 1280-1440px window sizes. */
-  .compare-strip { grid-template-columns: 1fr; }
+  .compare-strip { grid-template-columns: minmax(0, 1fr); }
 }
 .compare-col {
   display: flex;
@@ -1194,7 +1224,7 @@ button { font: inherit; cursor: pointer; }
 
 /* Mobile drawer behaviour: sidebar collapses below 1024px */
 @media (max-width: 1023px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar {
     position: fixed;
     top: var(--appbar-h);
@@ -1215,7 +1245,7 @@ button { font: inherit; cursor: pointer; }
     z-index: 35;
   }
   .selection-bar { left: 0; }
-  .group-card { grid-template-columns: 1fr; }
+  .group-card { grid-template-columns: minmax(0, 1fr); }
   .group-meta { border-right: none; border-bottom: 1px solid var(--border); }
 }
 
