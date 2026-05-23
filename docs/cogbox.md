@@ -41,9 +41,7 @@ nix run github:illustris/cogbox -- start
 ### 2. Copy the project into the VM over SSH
 
 ```sh
-rsync -avz -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
-  /home/hritwik/Projects/qbit-filter \
-  root@127.0.0.1:/root/
+git clone git@github.com:HritwikSinghal/qbit-filter.git
 ```
 
 ### 3. SSH in and launch Claude
@@ -58,14 +56,6 @@ c .
 The `c` launcher already passes `--dangerously-skip-permissions` and sets
 `IS_SANDBOX=1` — full automatic mode is built in, no extra flags needed.
 
-### One-liner variant
-
-```sh
-nix run github:illustris/cogbox -- start && \
-rsync -avz -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
-  /home/hritwik/Projects/qbit-filter root@127.0.0.1:/root/ && \
-nix run github:illustris/cogbox -- ssh -- bash -c "cd /root/qbit-filter && c ."
-```
 
 ## Lifecycle
 
