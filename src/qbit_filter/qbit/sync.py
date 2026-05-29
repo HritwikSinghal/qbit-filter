@@ -106,7 +106,7 @@ async def poll(
     added-vs-changed partitioning stays correct.
 
     Backoff: when ``store`` is supplied, transient failures (timeout +
-    library exceptions) increment ``store.qbit_consecutive_failures`` and
+    library exceptions) increment ``store.telemetry.qbit_consecutive_failures`` and
     the sleep between ticks grows capped-exponentially. The next successful
     tick zeroes the counter and the sleep snaps back to ``interval``. Pass
     ``store=None`` from tests / one-off callers; backoff is then disabled.
@@ -146,12 +146,13 @@ async def poll(
             logger.warning("sync/maindata poll failed: %s", exc)
 
         if store is not None:
+            tel = store.telemetry
             if tick_ok:
-                store.qbit_consecutive_failures = 0
+                tel.qbit_consecutive_failures = 0
             else:
-                store.qbit_consecutive_failures += 1
+                tel.qbit_consecutive_failures += 1
             sleep_for = _backoff_seconds(
-                interval, store.qbit_consecutive_failures
+                interval, tel.qbit_consecutive_failures
             )
         else:
             sleep_for = interval

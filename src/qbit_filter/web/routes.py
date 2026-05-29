@@ -853,6 +853,7 @@ def _render_activity_oob(store: Store) -> str:
     """
     total = store.cold_boot_total
     done = store.cold_boot_processed
+    tel = store.telemetry
 
     arr = store.arr
     arr_configured = arr is not None and arr.configured
@@ -902,14 +903,14 @@ def _render_activity_oob(store: Store) -> str:
         or (sonarr_configured and arr is not None and not arr.sonarr_ok)
     )
 
-    if not store.qbit_connected and store.qbit_last_error:
+    if not tel.qbit_connected and tel.qbit_last_error:
         state = "stalled"
         pct = 100
         label = "qBittorrent unreachable"
         pct_text = "X"
         summary = (
-            f"qBittorrent at {store.qbit_host} is unreachable -- "
-            f"{store.qbit_last_error}"
+            f"qBittorrent at {tel.qbit_host} is unreachable -- "
+            f"{tel.qbit_last_error}"
         )
         bar_visible = False
     elif not store.cold_boot_done and total <= 0:
@@ -993,12 +994,13 @@ def _render_qbit_service_card(store: Store) -> str:
     - ``ok``: recent successful poll within :data:`_QBIT_STALE_AFTER`
     - ``stalled``: connected but no recent poll (or never connected)
     """
-    if not store.qbit_connected:
-        if store.qbit_last_error:
+    tel = store.telemetry
+    if not tel.qbit_connected:
+        if tel.qbit_last_error:
             state = "down"
             detail = (
                 f"<span class=\"qf-service-err\">"
-                f"{html_lib.escape(store.qbit_last_error)}</span>"
+                f"{html_lib.escape(tel.qbit_last_error)}</span>"
             )
         else:
             state = "connecting"
@@ -1008,11 +1010,11 @@ def _render_qbit_service_card(store: Store) -> str:
             name="qBittorrent",
             state=state,
             primary=detail,
-            secondary=html_lib.escape(store.qbit_host or ""),
+            secondary=html_lib.escape(tel.qbit_host or ""),
             ts=0.0,
             ts_prefix="",
         )
-    if store.qbit_poll_count == 0 or store.qbit_last_poll_at == 0:
+    if tel.qbit_poll_count == 0 or tel.qbit_last_poll_at == 0:
         # Connected but the first poll hasn't returned yet -- carry the
         # auth-bypass milestone into the card so the user sees forward
         # motion even before sync/maindata responds.
@@ -1021,19 +1023,19 @@ def _render_qbit_service_card(store: Store) -> str:
             name="qBittorrent",
             state="connecting",
             primary="Waiting for sync/maindata...",
-            secondary=html_lib.escape(store.qbit_host or ""),
+            secondary=html_lib.escape(tel.qbit_host or ""),
             ts=0.0,
             ts_prefix="",
         )
-    fresh = (time.time() - store.qbit_last_poll_at) <= _QBIT_STALE_AFTER
+    fresh = (time.time() - tel.qbit_last_poll_at) <= _QBIT_STALE_AFTER
     state = "ok" if fresh else "stale"
     primary = (
         f"<strong>{len(store.torrents)}</strong> torrents "
         f"&middot; <strong>{len(store.groups)}</strong> groups"
     )
     secondary = (
-        f"{store.qbit_poll_count} polls"
-        + (f" &middot; {html_lib.escape(store.qbit_host)}" if store.qbit_host else "")
+        f"{tel.qbit_poll_count} polls"
+        + (f" &middot; {html_lib.escape(tel.qbit_host)}" if tel.qbit_host else "")
     )
     return _service_card_html(
         slug="qbit",
@@ -1041,7 +1043,7 @@ def _render_qbit_service_card(store: Store) -> str:
         state=state,
         primary=primary,
         secondary=secondary,
-        ts=store.qbit_last_poll_at,
+        ts=tel.qbit_last_poll_at,
         ts_prefix="last poll",
     )
 

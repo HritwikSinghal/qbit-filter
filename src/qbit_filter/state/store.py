@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from qbit_filter.domain import Group, GroupKey, Torrent
+from qbit_filter.state.telemetry import Telemetry
 
 if TYPE_CHECKING:
     from qbit_filter.state.arr_store import ArrStore
@@ -45,24 +46,11 @@ class Store:
     cold_boot_processed: int = 0
     cold_boot_done: bool = False
     cold_boot_log: list[str] = field(default_factory=list)
-    # qBit connection telemetry surfaced by the activity dialog. Mutated by
-    # ``app._poller`` on connect/disconnect and by ``Reconciler.apply`` on
-    # every successful poll cycle. ``qbit_last_poll_at`` is a wall-clock
-    # timestamp (``time.time()``) so the browser can render it as
-    # "N seconds ago" relative to its own clock; monotonic time would be
-    # meaningless across the process / client boundary. ``qbit_last_error``
-    # is cleared on the next successful poll.
-    qbit_connected: bool = False
-    qbit_last_poll_at: float = 0.0
-    qbit_poll_count: int = 0
-    qbit_last_error: str = ""
-    qbit_host: str = ""
-    # Rolling count of consecutive failed poll ticks. Reset to 0 on the next
-    # successful tick. Drives the capped-exponential backoff inside
-    # ``qbit/sync.py:poll()`` and the healthy<->degraded transition logged
-    # by ``app._poller``. Surfaced via the activity log; not yet rendered
-    # directly in the activity dialog.
-    qbit_consecutive_failures: int = 0
+    # qBit poller connection telemetry (connect status, last poll, poll
+    # count, last error, host, consecutive failures). Owned by the poller;
+    # everyone else reads. Non-optional -- the poller always runs -- so reads
+    # never need a None guard. See ``state/telemetry.py``.
+    telemetry: Telemetry = field(default_factory=Telemetry)
 
     def snapshot_groups(self) -> list[Group]:
         return list(self.groups.values())
