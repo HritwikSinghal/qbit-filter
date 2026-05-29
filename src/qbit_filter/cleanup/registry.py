@@ -1,43 +1,61 @@
 """Slug-keyed registry of all cleanup rule presets. The web layer uses this to
 populate the rule-selector chrome and to dispatch `/rules/{slug}/preview` /
-`/rules/{slug}/apply`."""
+`/rules/{slug}/apply`.
+
+Rules are auto-discovered: every module under ``cleanup/rules/`` that defines an
+``ORDER: int`` and a ``RULE`` instance is picked up automatically, ordered by
+``ORDER`` (slug as a stable tiebreak). Dropping a new ``cleanup/rules/<slug>.py``
+registers it with no edit here -- this is the plugin extension point.
+"""
 
 from __future__ import annotations
 
+import importlib
 import logging
+import pkgutil
 
-from qbit_filter.cleanup.rules import (
-    ArrCutoffMetColdRule,
-    ArrImportBrokenRule,
-    ArrUnmonitoredCompletedRule,
-    CrossSeedDuplicateRule,
-    DeadTrackerRule,
-    DuplicateSameQualityRule,
-    OrphanedArrTagRule,
-    OrphanedOnDiskRule,
-    PathCollisionRule,
-    RatioMetAndColdRule,
-    Rule,
-    StalledAndOldRule,
-    SupersededQualityRule,
-)
+from qbit_filter.cleanup import rules as _rules_pkg
+from qbit_filter.cleanup.types import Rule
 
 logger = logging.getLogger(__name__)
 
-RULES: tuple[Rule, ...] = (
-    SupersededQualityRule(),
-    DuplicateSameQualityRule(),
-    StalledAndOldRule(),
-    RatioMetAndColdRule(),
-    ArrCutoffMetColdRule(),
-    ArrUnmonitoredCompletedRule(),
-    ArrImportBrokenRule(),
-    OrphanedArrTagRule(),
-    DeadTrackerRule(),
-    CrossSeedDuplicateRule(),
-    OrphanedOnDiskRule(),
-    PathCollisionRule(),
-)
+
+def _discover() -> tuple[Rule, ...]:
+    """Import every rule module under ``cleanup.rules`` and collect its ``RULE``
+    instance, ordered by the module's ``ORDER`` constant. ``pkgutil`` lists the
+    submodules without importing them; ``import_module`` runs each body (which
+    constructs its ``RULE``). Modules missing ``RULE``/``ORDER`` -- or named with
+    a leading underscore -- are skipped with a warning so a stray helper file in
+    the package can't masquerade as a rule.
+    """
+    found: list[tuple[int, str, Rule]] = []
+    seen_order: dict[int, str] = {}
+    for mod_info in pkgutil.iter_modules(_rules_pkg.__path__):
+        if mod_info.name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{_rules_pkg.__name__}.{mod_info.name}")
+        rule = getattr(module, "RULE", None)
+        order = getattr(module, "ORDER", None)
+        if rule is None or order is None:
+            logger.warning(
+                "cleanup rule module %s missing RULE/ORDER; skipped", mod_info.name
+            )
+            continue
+        if order in seen_order:
+            logger.warning(
+                "cleanup rule ORDER %d reused by %s and %s; ordering falls back "
+                "to slug",
+                order,
+                seen_order[order],
+                rule.slug,
+            )
+        seen_order[order] = rule.slug
+        found.append((order, rule.slug, rule))
+    found.sort(key=lambda item: (item[0], item[1]))
+    return tuple(rule for _, _, rule in found)
+
+
+RULES: tuple[Rule, ...] = _discover()
 
 BY_SLUG: dict[str, Rule] = {r.slug: r for r in RULES}
 
