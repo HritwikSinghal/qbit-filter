@@ -1,11 +1,33 @@
 # Project: qbit-filter
-> Last updated: 2026-05-23 | Session: 12 (Responsive layout + row-click toggle)
+> Last updated: 2026-05-30 | Session: 13 (P1 structural refactors)
 
 ## Current state
 
-**Session 12 (uncommitted, working tree dirty):** two small UI fixes
-sitting in `src/qbit_filter/web/static/{custom.css,keys.js}`. No
-commit yet -- user hasn't asked. ruff / mypy unchanged (CSS + JS only).
+**Session 13 landed the four P1 structural refactors** on branch
+`refactor/priority-3-structural` (4 commits, not yet merged to `master` or
+pushed). ruff clean; mypy has only the two pre-existing
+`arr/client.py:556,573` errors -- no new ones. Each refactor was verified
+statically (ruff + mypy --strict) and via TestClient/import smokes; the
+SSE-driven filter path and telemetry round-trip still want a manual boot
+against the live qBit instance (see pickup priority 3).
+
+- `ce8e71e refactor: split cleanup/rules.py into a pluggable package` --
+  one rule per `cleanup/rules/<slug>.py`; `types.py` + `scoring.py` extracted;
+  `registry.py` auto-discovers via `pkgutil`/`ORDER`. The plugin surface.
+- `ea8c404 refactor: extract qBit telemetry off Store` -- new
+  `state/telemetry.py` `Telemetry` dataclass via `Store.telemetry`;
+  `cold_boot_*` stays on `Store`.
+- `e0c2be2 refactor: split web/routes.py into a routes package` -- 8
+  `APIRouter` modules under `web/routes/`; `register_routes` unchanged.
+- `34c4d52 refactor: route filter changes through the SSE RESYNC path` --
+  filter POSTs respond 204 + enqueue a coalesce-exempt `RESYNC_FILTER`.
+
+**Session 12 (`b9dbe8e`) + housekeeping (`01a6f86`, `8e66d45`) precede
+session 13 on `master`.** Session 12 was the responsive `minmax(0, 1fr)`
+layout fix + plain row-click-to-toggle (CSS + JS only); detail in items 1-2
+below.
+
+**Session 12 detail (shipped in `b9dbe8e`):** two small UI fixes.
 
 1. **Responsive layout fix.** The page was rendering at a fixed
    `mainW = 2734 px` regardless of viewport (1920 / 1440 / 1024 / 720
@@ -35,11 +57,11 @@ commit yet -- user hasn't asked. ruff / mypy unchanged (CSS + JS only).
    `.reason-factors`, `.factor` (and their compare-strip equivalents)
    guards against a future `user-select: none` higher up the tree.
 
-**Master is clean otherwise** -- session 10 sweep + session 11 fix
-remain the most recent shipped work. Sessions 11 quick-fix and
-session 10 sweep details retained below for context. ruff clean;
-mypy has the two pre-existing `arr/client.py:556,573` errors -- not
-introduced this session (CSS + JS only).
+**Session 12 (`b9dbe8e`) is the most recent feature work on `master`;**
+the two trailing commits (`01a6f86`, `8e66d45`) are housekeeping only.
+Session 11 quick-fix and session 10 sweep details are retained below for
+context. ruff clean; mypy has the two pre-existing
+`arr/client.py:556,573` errors.
 
 **Session 11 quick-fix (`3c31de9 fix: extend Sonarr history walk for
 arr-live chip`):** the "arr live" chip was already wired for both
@@ -178,16 +200,7 @@ list..." progress block.
 
 ### Pickup priorities (in order)
 
-0. **Commit session 12.** Two-file working-tree change
-   (`web/static/custom.css`, `web/static/keys.js`). Suggested single
-   commit (the two fixes were reported together and share the
-   "selection / row UX" theme):
-       fix: make layout responsive and rows click-to-toggle
-
-   - `minmax(0, 1fr)` everywhere `1fr` previously sat on a grid track
-     that could host an unbreakable child.
-   - plain row click toggles selection with a drag/selection guard so
-     text inside `.name` / `.meta` / `.factor` remains copyable.
+> [x] Session 12 committed (`b9dbe8e`) -- the former priority 0 is done.
 
 1. **Live-verify reliability changes against the real qBit instance.**
    The Playwright smokes hit a live ~1310-torrent catalogue and went
@@ -216,26 +229,30 @@ list..." progress block.
    - **Open in Radarr/Sonarr deep-link** -- kebab menu item using
      `arr_meta.title_slug` + `radarr_url` / `sonarr_url`.
 
-3. **Structural refactors flagged by session-10 arch review (P1):**
-   - `web/routes.py` is 1637 lines (grew from 1600 after `bd671d5` added
-     activity-widget plumbing), 7+ distinct responsibilities. Extract
-     activity widget, SSE protocol, rule preview helpers into separate
-     modules. Adding new cleanup rules will be painful until this lands.
-   - `state/store.py` `Store` is small (74 lines) but already carries
-     three kinds of fields: canonical (torrents/groups/rid),
-     memoisation (`facet_cache`), telemetry (`qbit_connected`,
-     `qbit_last_*`, `qbit_consecutive_failures`, `cold_boot_*`). Not
-     urgent at current size, but call out the boundary: telemetry
-     should move to a `Telemetry` dataclass owned by the poller before
-     it grows further.
-   - `cleanup/rules.py` is 800 lines (grew with per-season + arr-current
-     changes), one-file-many-rules. Move each rule to
-     `cleanup/rules/<slug>.py`, shared scoring helpers to
-     `cleanup/scoring.py`. Registry auto-imports via `pkgutil`. This is
-     the surface the End Goal calls out as the plugin extension point.
-   - `_oob_payload` re-renders all visible groups per filter click.
-     Push filter changes through the SSE RESYNC path; respond 204
-     and let SSE deliver the heavy render.
+3. **[x] Structural refactors flagged by session-10 arch review (P1) --
+   DONE (session 13, all four landed as separate commits):**
+   - [x] `cleanup/rules.py` split into a pluggable `cleanup/rules/<slug>.py`
+     package + `cleanup/types.py` + `cleanup/scoring.py`; `registry.py`
+     auto-discovers via `pkgutil` ordered by each module's `ORDER`
+     (`ce8e71e`). Adding a rule is now "drop a file in `cleanup/rules/`".
+   - [x] `state/store.py` telemetry moved into a `Telemetry` dataclass
+     (`state/telemetry.py`) reached via a non-optional `Store.telemetry`
+     handle; `cold_boot_*` deliberately kept on `Store` (reconciler-owned,
+     SSE-hot-path) (`ea8c404`).
+   - [x] `web/routes.py` (1640 lines) split into a `web/routes/` package
+     of `APIRouter` modules (page, sse, activity, rules_preview, filters,
+     actions, arr_history, _shared); `register_routes` unchanged for
+     `app.py` (`e0c2be2`). Pure code-move, no behaviour change.
+   - [x] `_oob_payload` removed; filter POSTs now respond 204 and enqueue a
+     coalesce-exempt `RESYNC_FILTER` so SSE delivers the re-render
+     (`34c4d52`). Template `hx-swap` -> `none`; session-save retimed to the
+     `#active-filters` OOB swap.
+   - **Live-verify still owed:** the SSE-driven filter path and the
+     telemetry round-trip were verified statically + via TestClient (no
+     live qBit here). Re-run the manual boot checklist below against the
+     real instance: filter toggles update `#groups` via SSE, rapid toggles
+     don't blank the list, a toggle during a poller tick still applies,
+     rule preview + bulk delete still work.
 
 4. **Poster proxy `/poster/{src}/{id}`.** ~50 LOC async route in
    `web/routes.py`; pipes `httpx` -> `StreamingResponse`, strips API
@@ -335,9 +352,28 @@ list..." progress block.
 - Action endpoints (`/torrents/{hash}/{action}`) call
   `qbit/actions.py`, return 204. Reconciler picks up the change on
   next poll; SSE updates naturally. No double-write.
-- `cleanup/` houses the rule engine (registry + rule presets). The
-  rule set is the plugin surface -- adding a new criterion should be
-  a small, well-isolated change.
+- `cleanup/` houses the rule engine. `registry.py` auto-discovers rules
+  via `pkgutil.iter_modules` over the `cleanup/rules/` package, ordering by
+  each module's `ORDER: int` (slug tiebreak), and caches an `is_implemented`
+  probe at import (a rule that raises `NotImplementedError` from
+  `candidates(Store())` greys itself out instead of 500ing the bar). Each
+  rule lives in its own `cleanup/rules/<slug>.py` declaring `ORDER` + a
+  `RULE` instance -- adding a rule is "drop a file"; `rules/__init__.py`
+  re-exports the historic flat namespace for back-compat. `types.py` holds
+  the leaf types (`ReasonFactor`, `Candidate`, `Rule` Protocol, `FactorKind`,
+  `Severity`); `scoring.py` holds shared selection helpers (`age_days`,
+  `partition_by_season`, `pick_arr_current_keeper`); `factors.py` builds the
+  `ReasonFactor` pills. Splitting `types` out broke the old
+  `factors -> rules` import cycle. The rule set is the plugin surface.
+
+  **Registered rules (12 total -- 8 live, 4 stubbed/greyed-out):**
+  - Live: `superseded-quality`, `duplicate-same-quality`,
+    `stalled-and-old`, `ratio-met-cold`, `arr-unmonitored`,
+    `arr-cutoff-met-cold`, `arr-import-broken`, `arr-orphaned-tag`.
+  - Stub (raise `NotImplementedError`): `dead-tracker` (needs
+    tracker-status sync), `cross-seed-duplicate` + `path-collision`
+    (need content-path capture), `orphaned-on-disk` (needs disk
+    walker).
 - The shared kebab menu lives once in `index.html` (`<div
   id="kebab-menu">`); `static/keys.js` positions + populates it per
   click. Per-row inline menus were removed -- they dominated
@@ -364,10 +400,14 @@ src/qbit_filter/
   qbit/        client.py  sync.py  actions.py
   arr/         client.py  sync.py  index.py  models.py
   grouping/    parser.py  grouper.py  quality.py  parse_cache.py
-  state/       store.py  events.py  reconciler.py  views.py
+  state/       store.py  telemetry.py  events.py  reconciler.py  views.py
                subscribers.py  viewport.py  arr_store.py
-  cleanup/     registry.py  rules.py
-  web/         routes.py  render.py  filter_parse.py
+  cleanup/     registry.py  types.py  scoring.py  factors.py
+               rules/  __init__.py (re-export hub)  <slug>.py per rule
+  web/         render.py  filter_parse.py
+               routes/  __init__.py (register_routes)  _shared.py  page.py
+                        sse.py  activity.py  rules_preview.py  filters.py
+                        actions.py  arr_history.py
                templates/  base.html  index.html  _sidebar.html
                            _filters.html  _active_filters.html
                            _group.html  _torrent.html  _empty.html
@@ -395,7 +435,8 @@ nix:           flake.nix  flake.lock  (writeShellApplication shim;
 | Session 10: Reliability + UX sweep | Done (`b78fdb1`) | 12/12 |
 | Session 10 features: per-season TV scoping, keep-newest dup, header activity widget, arr-current keeper | Done (`025c607`, `b4999cf`, `bd671d5`, `ab72615`) | 4/4 |
 | Session 11: Sonarr arr-live coverage fix | Done (`3c31de9`) | 1/1 |
-| Session 12: Responsive layout + row-click toggle | Working tree (uncommitted) | 2/2 |
+| Session 12: Responsive layout + row-click toggle | Done (`b9dbe8e`) | 2/2 |
+| Session 13: P1 structural refactors (rules package, Telemetry, routes package, filters-via-SSE) | Done (`ce8e71e`, `ea8c404`, `e0c2be2`, `34c4d52`) | 4/4 |
 
 Phase 9 remaining: 9.2 (README + CLAUDE.md final pass), 9.3 (verify
 Python deps in nixpkgs), 9.4 (proper flake.nix derivation), 9.5 (Nix
@@ -418,6 +459,36 @@ data-qf-state, structured debug logging baseline (Python + JS).
 <!-- Append as: YYYY-MM-DD: [decision]. Keep entries that still affect
      current behaviour; let git log own the rest. -->
 
+- 2026-05-30 (session 13): P1 structural refactors, all four landed
+  (`ce8e71e`, `ea8c404`, `e0c2be2`, `34c4d52`). Key decisions worth keeping:
+  - Rule registry auto-discovery uses a per-module `ORDER: int` constant
+    (sorted with `slug` as tiebreak), chosen over a registration decorator
+    (fragile global mutable state under `--strict`) and a central ordered
+    slug list (defeats "drop a file to add a rule"). `pkgutil.iter_modules`
+    lists, `import_module` runs each body to collect its `RULE` instance;
+    modules missing `RULE`/`ORDER` are skipped with a warning.
+  - `cleanup/types.py` holds the leaf types (`ReasonFactor`, `Candidate`,
+    `Rule` Protocol, `FactorKind`, `Severity`) so `factors.py` and the rule
+    modules import from it -- this breaks the old `factors -> rules` cycle
+    that forced the function-local `import factors as F` workaround.
+  - `Telemetry` is qBit-only and NOT unified with `ArrStore`'s parallel
+    telemetry (different mutator + cadence). `cold_boot_*` stays on `Store`
+    (reconciler-owned, read in the SSE hot path); only the 6 poller-owned
+    `qbit_*` fields moved. The handle is non-optional to avoid `arr`-style
+    Optional-chaining noise.
+  - `RESYNC_FILTER` is coalesce-exempt by design: a user filter click is
+    rare vs poller ticks and must never be swallowed by the 1 s RESYNC
+    window. It renders with full-RESYNC semantics (canonical slugs +
+    data-final). Filter POSTs return 204; the client `hx-swap="none"` +
+    SSE delivers the render. Rule preview was deliberately NOT migrated --
+    it depends on a one-shot `#qf-rule-activation` marker in its HTML body.
+  - Session-save (localStorage) retimed from the filter POST's
+    `htmx:afterSettle` (now reads pre-change state, since the strip arrives
+    via SSE) to the `#active-filters`/`#rule-bar-slot` `oobAfterSwap`, with
+    a dirty-check so the per-RESYNC re-OOB doesn't thrash storage.
+  - Branch `refactor/priority-3-structural`, not yet merged/pushed. No
+    `tests/` dir still (priority 7) -- a registry slug-set/order regression
+    test is the obvious first backfill.
 - 2026-05-23 (session 12): Every grid track that hosts user-driven
   content must use `minmax(0, 1fr)`, not bare `1fr`. CSS resolves bare
   `1fr` to `minmax(auto, 1fr)`, which lets the track's min-content

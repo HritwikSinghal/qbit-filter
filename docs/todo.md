@@ -24,8 +24,19 @@ description here for context.
 
 ## Done
 
+- [x] **P1 structural refactors (session 13).** All four flagged by the
+      session-10 arch review, landed as separate commits on branch
+      `refactor/priority-3-structural`:
+      `cleanup/rules.py` -> pluggable `cleanup/rules/<slug>.py` package +
+      `types.py` + `scoring.py` + `pkgutil` registry (`ce8e71e`);
+      qBit telemetry off `Store` into `state/telemetry.py` (`ea8c404`);
+      `web/routes.py` -> `web/routes/` `APIRouter` package (`e0c2be2`);
+      filter changes routed through the SSE `RESYNC_FILTER` path, 204 +
+      `hx-swap="none"` (`34c4d52`). ruff + mypy --strict clean; verified
+      via TestClient/import smokes. Manual live-boot verification still
+      owed (see progress.md pickup #3).
 - [x] **Responsive layout + row-click toggle (session 12,
-      uncommitted).** Layout was rendering at a fixed ~2734 px wide
+      `b9dbe8e`).** Layout was rendering at a fixed ~2734 px wide
       regardless of viewport because a `white-space: nowrap` torrent
       name's min-content expanded the row's bare-`1fr` grid track,
       cascading up through `.group-card` and `.shell`. Changed every
