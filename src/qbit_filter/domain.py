@@ -201,6 +201,13 @@ class EventKind(Enum):
     # instead of waiting for the whole snapshot. Bypasses the RESYNC
     # coalesce window (which would collapse rapid chunks into one).
     RESYNC_PARTIAL = "resync_partial"
+    # User-initiated filter change. Enqueued to a single subscription's queue
+    # (not bus-published) so only that client re-renders. Rendered with full
+    # RESYNC semantics (canonical slugs + data-final so stale cards prune) but
+    # exempt from the coalesce window: filter clicks are rare relative to
+    # poller ticks and must never be dropped, or a click within 1 s of a
+    # poller RESYNC would silently do nothing.
+    RESYNC_FILTER = "resync_filter"
 
 
 @dataclass(frozen=True, slots=True)

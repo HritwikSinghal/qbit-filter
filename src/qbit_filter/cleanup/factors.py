@@ -13,15 +13,9 @@ rule's job -- this module just removes the formatting boilerplate.
 
 from __future__ import annotations
 
-import time
-
-from qbit_filter.cleanup.rules import FactorKind, ReasonFactor
+from qbit_filter.cleanup.scoring import age_days
+from qbit_filter.cleanup.types import FactorKind, ReasonFactor
 from qbit_filter.domain import Torrent
-
-
-def age_days(ts: int, now: int | None = None) -> int:
-    base = now if now is not None else int(time.time())
-    return max(0, (base - ts) // 86_400)
 
 
 def age_factor(

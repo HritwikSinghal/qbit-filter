@@ -33,7 +33,7 @@
             hx-post="/filters"
             hx-vals='{"facet": "search", "value": ""}'
             hx-target="#groups"
-            hx-swap="innerHTML">
+            hx-swap="none">
       <span class="chip-facet">search</span>
       <span class="chip-label">"{{ filter_state.search }}"</span>
       <span aria-hidden="true">x</span>
@@ -46,7 +46,7 @@
             hx-post="/filters"
             hx-vals='{"facet": "min_torrents", "value": "1"}'
             hx-target="#groups"
-            hx-swap="innerHTML">
+            hx-swap="none">
       <span class="chip-facet">groups</span>
       <span class="chip-label">{{ filter_state.min_torrents }}+ torrents</span>
       <span aria-hidden="true">x</span>
@@ -68,7 +68,7 @@
             hx-post="/filters"
             hx-vals='{"facet": "{{ facet }}", "value": "{{ value|e }}"}'
             hx-target="#groups"
-            hx-swap="innerHTML">
+            hx-swap="none">
       <span class="chip-facet">{% if negated %}NOT {% endif %}{{ facet[4:] if negated else facet }}</span>
       <span class="chip-label">{{ value }}</span>
       <span aria-hidden="true">x</span>
@@ -79,7 +79,7 @@
             type="button"
             hx-post="/filters/clear"
             hx-target="#groups"
-            hx-swap="innerHTML">
+            hx-swap="none">
       Clear all
     </button>
   {% endif %}

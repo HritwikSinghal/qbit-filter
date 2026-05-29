@@ -59,7 +59,8 @@ async def _poller(
     settings: Settings,
 ) -> None:
     store: Store = app.state.store
-    store.qbit_host = settings.qbittorrent_host
+    tel = store.telemetry
+    tel.qbit_host = settings.qbittorrent_host
     _append_activity(store, f"Connecting to qBittorrent at {settings.qbittorrent_host}")
     # connect() blocks on a thread that ``asyncio.to_thread`` cannot
     # cancel; without a timeout, a hung qBit (paused container, slow DNS,
@@ -72,19 +73,19 @@ async def _poller(
         )
     except TimeoutError:
         logger.error("qBit connect timed out; poller exiting")
-        store.qbit_connected = False
-        store.qbit_last_error = "connect timeout (15s)"
+        tel.qbit_connected = False
+        tel.qbit_last_error = "connect timeout (15s)"
         _append_activity(store, "qBittorrent connect timed out (15s)")
         return
     except Exception as exc:
         logger.exception("could not connect to qBittorrent; poller exiting")
-        store.qbit_connected = False
-        store.qbit_last_error = f"connect failed: {exc}"
+        tel.qbit_connected = False
+        tel.qbit_last_error = f"connect failed: {exc}"
         _append_activity(store, f"qBittorrent connect failed: {exc}")
         return
     app.state.qbit = client
-    store.qbit_connected = True
-    store.qbit_last_error = ""
+    tel.qbit_connected = True
+    tel.qbit_last_error = ""
     _append_activity(store, "qBittorrent connected -- subscribing to sync/maindata")
     logger.info("qbit poller: connected, entering poll loop")
     # Track the previously-reported health so we only log the
@@ -98,28 +99,28 @@ async def _poller(
             len(delta.added),
             len(delta.changed),
             len(delta.removed),
-            store.qbit_consecutive_failures,
+            tel.qbit_consecutive_failures,
         )
         try:
             await reconciler.apply(delta)
         except Exception as exc:
             logger.exception("reconciler.apply raised")
-            store.qbit_last_error = f"reconciler failed: {exc}"
+            tel.qbit_last_error = f"reconciler failed: {exc}"
             continue
-        store.qbit_last_poll_at = time.time()
-        store.qbit_poll_count += 1
-        store.qbit_last_error = ""
+        tel.qbit_last_poll_at = time.time()
+        tel.qbit_poll_count += 1
+        tel.qbit_last_error = ""
         # Healthy<->degraded transitions surface in the activity log.
         # ``poll()`` resets ``qbit_consecutive_failures`` to 0 on a
         # successful tick, so by the time we get here for a successful
-        # delta, ``store.qbit_consecutive_failures`` is 0 and
+        # delta, ``tel.qbit_consecutive_failures`` is 0 and
         # ``last_failures`` carries the count before this tick.
-        if last_failures > 0 and store.qbit_consecutive_failures == 0:
+        if last_failures > 0 and tel.qbit_consecutive_failures == 0:
             _append_activity(
                 store,
                 f"qBittorrent recovered after {last_failures} failed poll(s)",
             )
-        last_failures = store.qbit_consecutive_failures
+        last_failures = tel.qbit_consecutive_failures
 
 
 async def _arr_poller(
