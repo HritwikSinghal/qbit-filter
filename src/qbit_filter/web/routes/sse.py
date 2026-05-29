@@ -176,32 +176,46 @@ def _render_event_batch_iter(
     the browser without being collapsed into a later one. The natural
     chunk pace (~50-150 ms per chunk for parsing) plus a 100 ms floor
     guards against runaway publishers.
+
+    :class:`EventKind.RESYNC_FILTER` (a user filter change, enqueued to this
+    one subscription) renders with full-RESYNC semantics but is fully
+    coalesce-exempt: a filter click must always re-render, even when it lands
+    within the 1 s window of a poller RESYNC, or the UI would appear frozen.
     """
+    resync_kinds = (
+        EventKind.RESYNC,
+        EventKind.RESYNC_PARTIAL,
+        EventKind.RESYNC_FILTER,
+    )
     has_resync = any(e.kind == EventKind.RESYNC for e in events)
     has_partial = any(e.kind == EventKind.RESYNC_PARTIAL for e in events)
+    has_filter = any(e.kind == EventKind.RESYNC_FILTER for e in events)
     # Empty-store RESYNC: ship only the activity widget update so log lines
     # added by arr_fetch_loop (which runs before qBit responds) reach the
     # user, without wiping #groups -- the server-side chrome already left
     # it as the loading affordance. The reconciler's first chunk publishes
     # a fresh RESYNC_PARTIAL with non-empty store, which takes the normal
-    # batched path below.
-    if (has_resync or has_partial) and not store.torrents:
+    # batched path below. A filter change on a still-empty store has nothing
+    # to render either, so it folds into the same guard.
+    if (has_resync or has_partial or has_filter) and not store.torrents:
         yield _esc_for_sse(render_activity_oob(store))
-        events = [
-            e for e in events
-            if e.kind not in (EventKind.RESYNC, EventKind.RESYNC_PARTIAL)
-        ]
+        events = [e for e in events if e.kind not in resync_kinds]
         if not events:
             return
         has_resync = False
         has_partial = False
-    if has_resync or has_partial:
+        has_filter = False
+    if has_resync or has_partial or has_filter:
         now = time.monotonic()
-        # RESYNC_PARTIAL bypasses the 1 s coalesce window but honours a
-        # 100 ms floor. A full RESYNC in the same batch upgrades the
-        # treatment to "full RESYNC" semantics so the canonical-slugs
-        # final batch still lands and the load-progress UI clears.
-        if has_resync:
+        # RESYNC_FILTER is coalesce-exempt (window 0) so a user filter click
+        # always renders. RESYNC_PARTIAL bypasses the 1 s window but honours a
+        # 100 ms floor. A full RESYNC in the same batch upgrades the treatment
+        # to "full RESYNC" semantics so the canonical-slugs final batch still
+        # lands and the load-progress UI clears.
+        if has_filter:
+            window = 0.0
+            last = 0.0
+        elif has_resync:
             window = RESYNC_COALESCE_INTERVAL
             last = sub.last_resync_at
         else:
@@ -210,16 +224,15 @@ def _render_event_batch_iter(
         if now - last >= window:
             sub.last_resync_at = now
             sub.last_partial_at = now
-            is_final = has_resync
+            # Filter changes and full RESYNCs both carry canonical slugs +
+            # data-final so the client prunes cards that no longer match.
+            is_final = has_resync or has_filter
             yield from _emit_resync_batches(request, store, sub, is_final=is_final)
             # The batched snapshot is authoritative; drop any delta events
             # in the same tick. Their state is already reflected.
             return
-        # Throttle window hit -- drop the RESYNC/RESYNC_PARTIAL, let deltas through.
-        events = [
-            e for e in events
-            if e.kind not in (EventKind.RESYNC, EventKind.RESYNC_PARTIAL)
-        ]
+        # Throttle window hit -- drop the resync-family events, let deltas through.
+        events = [e for e in events if e.kind not in resync_kinds]
         if not events:
             return
 

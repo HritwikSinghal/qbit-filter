@@ -1247,37 +1247,46 @@
   function saveSession() {
     try {
       const state = readActiveSelection();
-      if (stateIsEmpty(state)) localStorage.removeItem(SESSION_KEY);
-      else localStorage.setItem(SESSION_KEY, JSON.stringify(state));
+      const next = stateIsEmpty(state) ? null : JSON.stringify(state);
+      const prev = localStorage.getItem(SESSION_KEY);
+      /* Dirty-check: #active-filters re-OOBs on every poller RESYNC (~1/s),
+         so without this we'd rewrite localStorage on every tick. Only touch
+         storage when the canonical state actually changed. */
+      if (next === prev) return;
+      if (next === null) localStorage.removeItem(SESSION_KEY);
+      else localStorage.setItem(SESSION_KEY, next);
       qfLog.debug('session saved', state);
     } catch (e) { qfLog.warn('session save failed', e); }
   }
 
-  /* Persist after every successful filter / rule POST. ``htmx:afterSettle``
-     fires when the response DOM has been swapped + animated, so reading
-     the new pressed-chip state at this point gives us the canonical
-     post-mutation snapshot. */
-  document.body.addEventListener('htmx:afterSettle', (e) => {
-    const url = e.detail && e.detail.requestConfig && e.detail.requestConfig.path;
-    if (!url) return;
-    if (url.startsWith('/filters') || url.startsWith('/rules/')) {
+  /* Persist whenever the canonical filter/rule chrome actually updates.
+     Filter changes now respond 204 and deliver the updated #active-filters
+     strip (which carries data-qf-state) over SSE, so saving on the POST's
+     afterSettle would read the PRE-change state. Tie the save to the OOB
+     swap of #active-filters / #rule-bar-slot instead -- that fires whether
+     the swap arrived via SSE (filters) or the rule-preview HTML response,
+     and saveSession() dirty-checks so the per-RESYNC re-OOB is a no-op. */
+  document.body.addEventListener('htmx:oobAfterSwap', (e) => {
+    const target = e.detail && e.detail.target;
+    if (target && (target.id === 'active-filters' || target.id === 'rule-bar-slot')) {
       saveSession();
     }
   });
 
   function htmxAjax(method, path, values) {
-    /* Promise wrapper around htmx.ajax so we can await each step. The
-       target+swap mirror what the corresponding hx-* attributes on the
-       original buttons use: #groups innerHTML for both /filters and the
-       rule-preview endpoint. htmx runs OOB swaps for active-filters,
-       filter-facets, and rule-bar-slot automatically from the response,
-       so the chrome chips redraw correctly. */
+    /* Promise wrapper around htmx.ajax so we can await each replay step.
+       /filters* now respond 204 and deliver the re-render over SSE
+       (RESYNC_FILTER), so those use swap:'none' -- htmx must not try to
+       swap an empty body into #groups. The rule-preview endpoint still
+       returns HTML and swaps #groups innerHTML (its rule-bar-slot OOB and
+       the one-shot activation marker ride along in that response). */
     return new Promise((resolve) => {
       if (typeof window.htmx === 'undefined') { resolve(); return; }
+      const swap = path.indexOf('/filters') === 0 ? 'none' : 'innerHTML';
       try {
         window.htmx.ajax(method, path, {
           target: '#groups',
-          swap: 'innerHTML',
+          swap: swap,
           values: values || {},
         }).then(resolve, () => resolve());
       } catch (e) { resolve(); }

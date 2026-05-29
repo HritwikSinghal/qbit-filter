@@ -7,7 +7,7 @@
             class="clear-all"
             hx-post="/filters/clear"
             hx-target="#groups"
-            hx-swap="innerHTML"
+            hx-swap="none"
             {% if not active_count %}disabled aria-disabled="true"{% endif %}>
       Clear all
     </button>
@@ -23,7 +23,7 @@
          hx-post="/filters/search"
          hx-trigger="input changed delay:250ms, search"
          hx-target="#groups"
-         hx-swap="innerHTML">
+         hx-swap="none">
 
   {% include "_filters.html" %}
 </div>
