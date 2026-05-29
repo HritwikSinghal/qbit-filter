@@ -3,9 +3,9 @@
 
 ## Current state
 
-**Session 13 landed the four P1 structural refactors** on branch
-`refactor/priority-3-structural` (4 commits, not yet merged to `master` or
-pushed). ruff clean; mypy has only the two pre-existing
+**Session 13 landed the four P1 structural refactors**, merged to `master`
+(`00773f4`, `--no-ff` merge of `refactor/priority-3-structural`; not yet
+pushed to `origin`). ruff clean; mypy has only the two pre-existing
 `arr/client.py:556,573` errors -- no new ones. Each refactor was verified
 statically (ruff + mypy --strict) and via TestClient/import smokes; the
 SSE-driven filter path and telemetry round-trip still want a manual boot
@@ -486,9 +486,9 @@ data-qf-state, structured debug logging baseline (Python + JS).
     `htmx:afterSettle` (now reads pre-change state, since the strip arrives
     via SSE) to the `#active-filters`/`#rule-bar-slot` `oobAfterSwap`, with
     a dirty-check so the per-RESYNC re-OOB doesn't thrash storage.
-  - Branch `refactor/priority-3-structural`, not yet merged/pushed. No
-    `tests/` dir still (priority 7) -- a registry slug-set/order regression
-    test is the obvious first backfill.
+  - Merged to `master` via `--no-ff` (`00773f4`); not yet pushed to
+    `origin`. No `tests/` dir still (priority 7) -- a registry
+    slug-set/order regression test is the obvious first backfill.
 - 2026-05-23 (session 12): Every grid track that hosts user-driven
   content must use `minmax(0, 1fr)`, not bare `1fr`. CSS resolves bare
   `1fr` to `minmax(auto, 1fr)`, which lets the track's min-content

@@ -13,9 +13,10 @@ SSE updates matter less than comparison, reasoning, and per-row override.
 
 The rule set will grow over time -- "quality upgrade check" (mark 1080p when a
 newer 2160p of the same title exists) is the first preset, not the whole
-project. Treat the cleanup engine (`cleanup/registry.py` + `cleanup/rules.py`)
-as a plugin surface: adding a new criterion should be a small, well-isolated
-change, not a refactor. Don't bake assumptions about any one rule into shared
+project. Treat the cleanup engine (`cleanup/registry.py` + the
+`cleanup/rules/` package) as a plugin surface: adding a new criterion is
+dropping a `cleanup/rules/<slug>.py` file (declaring `ORDER` + `RULE`), not a
+refactor. Don't bake assumptions about any one rule into shared
 infrastructure (selection UI, group layout, action surface, persistence) --
 those layers must serve N rules.
 
@@ -68,21 +69,29 @@ Design implications:
   parallel arr-enrichment store, mutated only by the `_arr_poller` task in
   `app.py`. `Store.arr` is a one-way pointer.
 - `state/views.py` is pure: snapshot in, filtered groups out.
-- `cleanup/` is the rule plugin surface. `registry.py` registers rule classes;
-  `rules.py` is the current library (one-file-many-rules; splitting into
-  `cleanup/rules/<slug>.py` is on the P1 refactor list). Stub rules raise
+- `cleanup/` is the rule plugin surface. `registry.py` auto-discovers rules
+  via `pkgutil` over the `cleanup/rules/` package, ordered by each module's
+  `ORDER`. Each rule is one `cleanup/rules/<slug>.py` declaring `ORDER` + a
+  `RULE` instance; `rules/__init__.py` re-exports the flat namespace for
+  back-compat. `types.py` holds the leaf types (`ReasonFactor`, `Candidate`,
+  `Rule` Protocol) and `scoring.py` the shared selection helpers, so
+  `factors.py` and the rules can import them without a cycle. Stub rules raise
   `NotImplementedError` and the registry surfaces them as greyed-out in the
   rule bar.
 - Each SSE client owns a `Subscription` with its own `FilterState`. Filter
-  changes update **that subscription's** state, not the store. FilterState is
+  POSTs update **that subscription's** state (not the store), return 204, and
+  enqueue a coalesce-exempt `RESYNC_FILTER` to that client's SSE queue -- the
+  re-render is delivered over SSE, not in the POST response. FilterState is
   echoed to the client as `data-qf-state` JSON and replayed from `localStorage`
   on SSE reconnect so selections survive `uvicorn --reload`.
 - Action endpoints (`/torrents/{hash}/{action}`) call `qbit/actions.py` and
   return 204. The reconciler picks up the change on next poll and SSE updates
   the UI naturally - no double-write.
-- The header activity widget reads telemetry fields off `Store`
-  (`qbit_connected`, `qbit_last_poll_at`, `qbit_consecutive_failures`, ...)
-  and the per-service counters on `ArrSnapshot`/`ArrStore`.
+- The header activity widget reads qBit poller telemetry off
+  `Store.telemetry` (a `Telemetry` dataclass in `state/telemetry.py`:
+  `qbit_connected`, `qbit_last_poll_at`, `qbit_consecutive_failures`, ...),
+  cold-boot progress off `Store` (`cold_boot_*`, reconciler-owned), and the
+  per-service counters on `ArrSnapshot`/`ArrStore`.
 
 ## qBit instance
 
